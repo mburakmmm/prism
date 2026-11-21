@@ -1,0 +1,153 @@
+import nox.mathx
+from core.color import clamp_u8
+from core.errors import DimensionError, InvalidImageError, ResourceLimitError
+from core.image import Image, MutableImage
+from core.pixel import Pixel
+from transforms.border import BorderMode, sample_with_border
+from transforms.resample import require_finite_float
+
+MAX_BLUR_RADIUS: int = 32
+
+def gaussian_kernel_1d(sigma: float, radius: int) -> list[float]:
+    """Generate a normalized 1D Gaussian kernel of length 2*radius + 1."""
+    require_finite_float(sigma, "sigma")
+    if sigma <= 0.0 or sigma > 64.0:
+        raise InvalidImageError("Gaussian sigma must be in range (0.0, 64.0]")
+    if radius < 1:
+        raise DimensionError("Gaussian kernel radius must be >= 1")
+    if radius > MAX_BLUR_RADIUS:
+        raise ResourceLimitError("Gaussian kernel radius " + str(radius) + " exceeds MAX_BLUR_RADIUS " + str(MAX_BLUR_RADIUS))
+
+    weights: list[float] = []
+    sum_w: float = 0.0
+    inv_2s2: float = 1.0 / (2.0 * sigma * sigma)
+    i: int = -radius
+    while i <= radius:
+        fi: float = float(i)
+        w: float = nox.mathx.exp(-(fi * fi) * inv_2s2)
+        weights.append(w)
+        sum_w = sum_w + w
+        i = i + 1
+
+    norm_weights: list[float] = []
+    j: int = 0
+    while j < len(weights):
+        norm_weights.append(weights[j] / sum_w)
+        j = j + 1
+    return norm_weights
+
+def _separable_blur_1d(img: Image, weights: list[float], radius: int, border_mode: BorderMode) -> Image:
+    w: int = img.width()
+    h: int = img.height()
+    has_a: bool = img.pixel_format().has_alpha()
+    const_zero: Pixel = Pixel.transparent()
+
+    # Pass 1: Horizontal 1D alpha-safe blur
+    horiz_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), const_zero, img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            sum_w: float = 0.0
+            sum_wa: float = 0.0
+            sum_r: float = 0.0
+            sum_g: float = 0.0
+            sum_b: float = 0.0
+            k: int = -radius
+            while k <= radius:
+                wt: float = weights[k + radius]
+                px: Pixel = sample_with_border(img, x + k, y, border_mode, const_zero)
+                sum_w = sum_w + wt
+                a_norm: float = 1.0
+                if has_a:
+                    a_norm = float(px.a) / 255.0
+                wa: float = wt * a_norm
+                sum_wa = sum_wa + wa
+                sum_r = sum_r + wa * float(px.r)
+                sum_g = sum_g + wa * float(px.g)
+                sum_b = sum_b + wa * float(px.b)
+                k = k + 1
+
+            out_a: int = 255
+            if has_a:
+                out_a = clamp_u8(int(sum_wa / sum_w * 255.0 + 0.5))
+            if out_a == 0 or sum_wa <= 1.0e-9:
+                horiz_mut.set_pixel(x, y, Pixel.transparent())
+            else:
+                horiz_mut.set_pixel(x, y, Pixel.rgba(clamp_u8(int(sum_r / sum_wa + 0.5)), clamp_u8(int(sum_g / sum_wa + 0.5)), clamp_u8(int(sum_b / sum_wa + 0.5)), out_a))
+            x = x + 1
+        y = y + 1
+
+    horiz_img: Image = horiz_mut.to_image()
+
+    # Pass 2: Vertical 1D alpha-safe blur
+    vert_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), const_zero, img.limits)
+    y = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            sum_w2: float = 0.0
+            sum_wa2: float = 0.0
+            sum_r2: float = 0.0
+            sum_g2: float = 0.0
+            sum_b2: float = 0.0
+            k2: int = -radius
+            while k2 <= radius:
+                wt2: float = weights[k2 + radius]
+                px2: Pixel = sample_with_border(horiz_img, x, y + k2, border_mode, const_zero)
+                sum_w2 = sum_w2 + wt2
+                a_norm2: float = 1.0
+                if has_a:
+                    a_norm2 = float(px2.a) / 255.0
+                wa2: float = wt2 * a_norm2
+                sum_wa2 = sum_wa2 + wa2
+                sum_r2 = sum_r2 + wa2 * float(px2.r)
+                sum_g2 = sum_g2 + wa2 * float(px2.g)
+                sum_b2 = sum_b2 + wa2 * float(px2.b)
+                k2 = k2 + 1
+
+            out_a2: int = 255
+            if has_a:
+                out_a2 = clamp_u8(int(sum_wa2 / sum_w2 * 255.0 + 0.5))
+            if out_a2 == 0 or sum_wa2 <= 1.0e-9:
+                vert_mut.set_pixel(x, y, Pixel.transparent())
+            else:
+                vert_mut.set_pixel(x, y, Pixel.rgba(clamp_u8(int(sum_r2 / sum_wa2 + 0.5)), clamp_u8(int(sum_g2 / sum_wa2 + 0.5)), clamp_u8(int(sum_b2 / sum_wa2 + 0.5)), out_a2))
+            x = x + 1
+        y = y + 1
+
+    res: Image = vert_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def box_blur(img: Image, radius: int, border_mode: BorderMode) -> Image:
+    """Apply a separable (2*radius + 1) x (2*radius + 1) box blur with alpha-safe border handling."""
+    if radius < 1:
+        raise DimensionError("box_blur radius must be >= 1: got " + str(radius))
+    if radius > MAX_BLUR_RADIUS:
+        raise ResourceLimitError("box_blur radius " + str(radius) + " exceeds MAX_BLUR_RADIUS " + str(MAX_BLUR_RADIUS))
+    k_len: int = 2 * radius + 1
+    w_val: float = 1.0 / float(k_len)
+    weights: list[float] = []
+    i: int = 0
+    while i < k_len:
+        weights.append(w_val)
+        i = i + 1
+    return _separable_blur_1d(img, weights, radius, border_mode)
+
+def gaussian_blur(img: Image, sigma: float, radius: int, border_mode: BorderMode) -> Image:
+    """Apply a separable 2-pass Gaussian blur (if radius == 0, uses ceil(3 * sigma))."""
+    require_finite_float(sigma, "sigma")
+    if sigma <= 0.0 or sigma > 64.0:
+        raise InvalidImageError("gaussian_blur sigma must be in range (0.0, 64.0]")
+    eff_rad: int = radius
+    if eff_rad == 0:
+        eff_rad = int(nox.mathx.ceil(3.0 * sigma))
+        if eff_rad < 1:
+            eff_rad = 1
+        if eff_rad > MAX_BLUR_RADIUS:
+            eff_rad = MAX_BLUR_RADIUS
+    weights: list[float] = gaussian_kernel_1d(sigma, eff_rad)
+    return _separable_blur_1d(img, weights, eff_rad, border_mode)

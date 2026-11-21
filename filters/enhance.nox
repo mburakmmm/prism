@@ -1,0 +1,334 @@
+import nox.mathx
+from core.color import clamp_u8, linear_to_srgb_channel, srgb_to_linear_channel
+from core.errors import DimensionError, InvalidImageError
+from core.image import Image, MutableImage
+from core.pixel import Pixel, PixelFormat
+from transforms.resample import require_finite_float
+
+__all__: list[str] = ["GrayscaleMode", "grayscale", "invert", "threshold", "posterize", "solarize", "brightness", "contrast", "saturation", "gamma_correct", "apply_lut", "split_channels", "merge_channels"]
+
+enum GrayscaleMode:
+    SRGB_LUMA
+    LINEAR_LUMINANCE
+
+    def name(self) -> str:
+        match self:
+            case GrayscaleMode.SRGB_LUMA:
+                return "SRGB_LUMA"
+            case GrayscaleMode.LINEAR_LUMINANCE:
+                return "LINEAR_LUMINANCE"
+
+def _pixel_linear_luma_u8(px: Pixel) -> int:
+    rl: float = srgb_to_linear_channel(px.r)
+    gl: float = srgb_to_linear_channel(px.g)
+    bl: float = srgb_to_linear_channel(px.b)
+    y_lin: float = 0.2126 * rl + 0.7152 * gl + 0.0722 * bl
+    return linear_to_srgb_channel(y_lin)
+
+def grayscale(img: Image, mode: GrayscaleMode) -> Image:
+    """Convert an Image to grayscale using either perceptual sRGB luma or linear-light luminance."""
+    w: int = img.width()
+    h: int = img.height()
+    has_a: bool = img.pixel_format().has_alpha()
+    out_fmt: PixelFormat = PixelFormat.GRAY8
+    if has_a:
+        out_fmt = PixelFormat.RGBA8
+
+    out_mut: MutableImage = MutableImage.create(w, h, out_fmt, Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            px: Pixel = img.get_pixel(x, y)
+            g_val: int = 0
+            if mode == GrayscaleMode.LINEAR_LUMINANCE:
+                g_val = _pixel_linear_luma_u8(px)
+            else:
+                g_val = px.luma_srgb()
+            if has_a:
+                out_mut.set_pixel(x, y, Pixel.rgba(g_val, g_val, g_val, px.a))
+            else:
+                out_mut.set_pixel(x, y, Pixel.gray(g_val))
+            x = x + 1
+        y = y + 1
+
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def invert(img: Image) -> Image:
+    """Invert RGB/gray channels (255 - c) while preserving alpha."""
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            px: Pixel = img.get_pixel(x, y)
+            out_mut.set_pixel(x, y, Pixel.rgba(255 - px.r, 255 - px.g, 255 - px.b, px.a))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def threshold(img: Image, cutoff: int) -> Image:
+    """Binarize pixels based on perceptual luma >= cutoff (in [0, 255]), preserving alpha."""
+    if cutoff < 0 or cutoff > 255:
+        raise InvalidImageError("threshold cutoff must be in range [0, 255]: got " + str(cutoff))
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            px: Pixel = img.get_pixel(x, y)
+            v: int = 0
+            if px.luma_srgb() >= cutoff:
+                v = 255
+            out_mut.set_pixel(x, y, Pixel.rgba(v, v, v, px.a))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def posterize(img: Image, bits: int) -> Image:
+    """Quantize each 8-bit color channel to its top `bits` (1..8) significant bits."""
+    if bits < 1 or bits > 8:
+        raise InvalidImageError("posterize bits must be in range [1, 8]: got " + str(bits))
+    mask: int = 255 << 8 - bits & 255
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            px: Pixel = img.get_pixel(x, y)
+            out_mut.set_pixel(x, y, Pixel.rgba(px.r & mask, px.g & mask, px.b & mask, px.a))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def solarize(img: Image, cutoff: int) -> Image:
+    """Invert channels whose value is >= cutoff (in [0, 255]), preserving alpha."""
+    if cutoff < 0 or cutoff > 255:
+        raise InvalidImageError("solarize cutoff must be in range [0, 255]: got " + str(cutoff))
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            px: Pixel = img.get_pixel(x, y)
+            nr: int = px.r
+            ng: int = px.g
+            nb: int = px.b
+            if nr >= cutoff:
+                nr = 255 - nr
+            if ng >= cutoff:
+                ng = 255 - ng
+            if nb >= cutoff:
+                nb = 255 - nb
+            out_mut.set_pixel(x, y, Pixel.rgba(nr, ng, nb, px.a))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def brightness(img: Image, delta: int) -> Image:
+    """Shift RGB channels by additive delta in [-255, 255], clamped to [0, 255]."""
+    if delta < -255 or delta > 255:
+        raise InvalidImageError("brightness delta must be in range [-255, 255]: got " + str(delta))
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            px: Pixel = img.get_pixel(x, y)
+            out_mut.set_pixel(x, y, Pixel.rgba(clamp_u8(px.r + delta), clamp_u8(px.g + delta), clamp_u8(px.b + delta), px.a))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def contrast(img: Image, factor: float) -> Image:
+    """Scale RGB contrast around midpoint 128 by factor >= 0.0."""
+    require_finite_float(factor, "factor")
+    if factor < 0.0:
+        raise InvalidImageError("contrast factor must be non-negative")
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            px: Pixel = img.get_pixel(x, y)
+            nr: int = clamp_u8(int(nox.mathx.floor((float(px.r) - 128.0) * factor + 128.5)))
+            ng: int = clamp_u8(int(nox.mathx.floor((float(px.g) - 128.0) * factor + 128.5)))
+            nb: int = clamp_u8(int(nox.mathx.floor((float(px.b) - 128.0) * factor + 128.5)))
+            out_mut.set_pixel(x, y, Pixel.rgba(nr, ng, nb, px.a))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def saturation(img: Image, factor: float) -> Image:
+    """Scale color saturation around perceptual luma by factor >= 0.0 (0.0 = grayscale, 1.0 = original)."""
+    require_finite_float(factor, "factor")
+    if factor < 0.0:
+        raise InvalidImageError("saturation factor must be non-negative")
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            px: Pixel = img.get_pixel(x, y)
+            lum: float = float(px.luma_srgb())
+            nr: int = clamp_u8(int(nox.mathx.floor(lum + (float(px.r) - lum) * factor + 0.5)))
+            ng: int = clamp_u8(int(nox.mathx.floor(lum + (float(px.g) - lum) * factor + 0.5)))
+            nb: int = clamp_u8(int(nox.mathx.floor(lum + (float(px.b) - lum) * factor + 0.5)))
+            out_mut.set_pixel(x, y, Pixel.rgba(nr, ng, nb, px.a))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def gamma_correct(img: Image, gamma_val: float) -> Image:
+    """Apply power-law gamma correction (c / 255) ** (1 / gamma_val) using precomputed 256-entry LUT."""
+    require_finite_float(gamma_val, "gamma_val")
+    if gamma_val <= 0.0 or gamma_val > 100.0:
+        raise InvalidImageError("gamma_val must be in range (0.0, 100.0]")
+    inv_g: float = 1.0 / gamma_val
+    lut: list[int] = []
+    i: int = 0
+    while i < 256:
+        norm: float = float(i) / 255.0
+        mapped: int = clamp_u8(int(nox.mathx.pow(norm, inv_g) * 255.0 + 0.5))
+        lut.append(mapped)
+        i = i + 1
+    return apply_lut(img, lut)
+
+def apply_lut(img: Image, lut_256: list[int]) -> Image:
+    """Apply a 256-entry 8-bit lookup table to the RGB/gray channels of img."""
+    if len(lut_256) != 256:
+        raise InvalidImageError("apply_lut requires a 256-entry lookup table")
+    i: int = 0
+    while i < 256:
+        if lut_256[i] < 0 or lut_256[i] > 255:
+            raise InvalidImageError("LUT value at index " + str(i) + " is outside [0, 255]")
+        i = i + 1
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            px: Pixel = img.get_pixel(x, y)
+            out_mut.set_pixel(x, y, Pixel.rgba(lut_256[px.r], lut_256[px.g], lut_256[px.b], px.a))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def split_channels(img: Image) -> list[Image]:
+    """Split an Image into 1 (GRAY8), 3 (RGB8), or 4 (RGBA8) single-channel GRAY8 Images."""
+    w: int = img.width()
+    h: int = img.height()
+    fmt: PixelFormat = img.pixel_format()
+    if fmt == PixelFormat.GRAY8:
+        return [img.clone()]
+
+    r_mut: MutableImage = MutableImage.create(w, h, PixelFormat.GRAY8, Pixel.black(), img.limits)
+    g_mut: MutableImage = MutableImage.create(w, h, PixelFormat.GRAY8, Pixel.black(), img.limits)
+    b_mut: MutableImage = MutableImage.create(w, h, PixelFormat.GRAY8, Pixel.black(), img.limits)
+    a_mut: MutableImage = MutableImage.create(w, h, PixelFormat.GRAY8, Pixel.black(), img.limits)
+    has_a: bool = fmt.has_alpha()
+
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            px: Pixel = img.get_pixel(x, y)
+            r_mut.set_pixel(x, y, Pixel.gray(px.r))
+            g_mut.set_pixel(x, y, Pixel.gray(px.g))
+            b_mut.set_pixel(x, y, Pixel.gray(px.b))
+            if has_a:
+                a_mut.set_pixel(x, y, Pixel.gray(px.a))
+            x = x + 1
+        y = y + 1
+
+    if has_a:
+        return [r_mut.to_image(), g_mut.to_image(), b_mut.to_image(), a_mut.to_image()]
+    return [r_mut.to_image(), g_mut.to_image(), b_mut.to_image()]
+
+def merge_channels(planes: list[Image]) -> Image:
+    """Merge 1 (GRAY8), 3 (RGB8), or 4 (RGBA8) equal-sized single-channel Images."""
+    n: int = len(planes)
+    if n != 1 and n != 3 and n != 4:
+        raise InvalidImageError("merge_channels expects 1, 3, or 4 channel Images (got " + str(n) + ")")
+    first: Image = planes[0]
+    w: int = first.width()
+    h: int = first.height()
+    i: int = 1
+    while i < n:
+        if planes[i].width() != w or planes[i].height() != h:
+            raise DimensionError("all channel Images in merge_channels must have identical dimensions")
+        i = i + 1
+
+    if n == 1:
+        return first.convert_format(PixelFormat.GRAY8)
+
+    out_fmt: PixelFormat = PixelFormat.RGB8
+    if n == 4:
+        out_fmt = PixelFormat.RGBA8
+    out_mut: MutableImage = MutableImage.create(w, h, out_fmt, Pixel.transparent(), first.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            r_v: int = planes[0].get_pixel(x, y).r
+            g_v: int = planes[1].get_pixel(x, y).r
+            b_v: int = planes[2].get_pixel(x, y).r
+            a_v: int = 255
+            if n == 4:
+                a_v = planes[3].get_pixel(x, y).r
+            out_mut.set_pixel(x, y, Pixel.rgba(r_v, g_v, b_v, a_v))
+            x = x + 1
+        y = y + 1
+    return out_mut.to_image()

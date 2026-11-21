@@ -53,7 +53,7 @@ jobs:
           noxc check --strict-spawn-shared prism.nox
           noxc check --strict-spawn-shared examples/capability_probe.nox
 
-      - name: Verify Freestanding Pure-NOX Core & Transform Modules
+      - name: Verify Freestanding Pure-NOX Core, Transform & Filter Modules
         run: |
           noxc check --profile freestanding core/errors.nox
           noxc check --profile freestanding core/limits.nox
@@ -71,6 +71,14 @@ jobs:
           noxc check --profile freestanding transforms/resize.nox
           noxc check --profile freestanding transforms/affine.nox
           noxc check --profile freestanding transforms/geometry.nox
+          noxc check --profile freestanding filters/enhance.nox
+          noxc check --profile freestanding filters/effects.nox
+          noxc check --profile freestanding filters/convolution.nox
+          noxc check --profile freestanding filters/gaussian.nox
+          noxc check --profile freestanding filters/sharpen.nox
+          noxc check --profile freestanding filters/edges.nox
+          noxc check --profile freestanding filters/median.nox
+          noxc check --profile freestanding filters/morphology.nox
           noxc check --profile freestanding codecs/deflate.nox
           noxc check --profile freestanding codecs/sniff.nox
           noxc check --profile freestanding codecs/registry.nox
@@ -88,3 +96,4 @@ jobs:
           noxc run examples/create_checkerboard.nox
           noxc run examples/thumbnails.nox
           noxc run examples/avatar.nox
+          noxc run examples/filters.nox

@@ -1,0 +1,79 @@
+import nox.mathx
+from core.color import clamp_u8
+from core.errors import DimensionError, InvalidImageError, ResourceLimitError
+from core.image import Image, MutableImage
+from core.pixel import Pixel
+from transforms.border import BorderMode, sample_with_border
+from transforms.resample import require_finite_float
+
+MAX_KERNEL_SIZE: int = 31
+
+def convolve(img: Image, kernel: list[float], kw: int, kh: int, divisor: float, bias: float, border_mode: BorderMode) -> Image:
+    """Apply an odd-sized kw x kh 2D convolution kernel with alpha-safe accumulation and border handling."""
+    if kw <= 0 or kh <= 0:
+        raise DimensionError("convolution kernel dimensions kw and kh must be positive")
+    if kw % 2 == 0 or kh % 2 == 0:
+        raise DimensionError("convolution kernel dimensions kw and kh must be odd integers")
+    if kw > MAX_KERNEL_SIZE or kh > MAX_KERNEL_SIZE:
+        raise ResourceLimitError("convolution kernel size " + str(kw) + "x" + str(kh) + " exceeds MAX_KERNEL_SIZE " + str(MAX_KERNEL_SIZE))
+    if len(kernel) != kw * kh:
+        raise InvalidImageError("convolution kernel length " + str(len(kernel)) + " does not match kw * kh (" + str(kw * kh) + ")")
+    require_finite_float(divisor, "divisor")
+    require_finite_float(bias, "bias")
+    if nox.mathx.abs(divisor) <= 1.0e-12:
+        raise InvalidImageError("convolution divisor must be non-zero")
+
+    k_idx: int = 0
+    while k_idx < len(kernel):
+        require_finite_float(kernel[k_idx], "kernel[" + str(k_idx) + "]")
+        k_idx = k_idx + 1
+
+    rx: int = kw // 2
+    ry: int = kh // 2
+    w: int = img.width()
+    h: int = img.height()
+    has_a: bool = img.pixel_format().has_alpha()
+    const_zero: Pixel = Pixel.transparent()
+
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), const_zero, img.limits)
+
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            acc_r: float = 0.0
+            acc_g: float = 0.0
+            acc_b: float = 0.0
+            center_a: int = img.get_pixel(x, y).a
+
+            ky: int = -ry
+            while ky <= ry:
+                sy: int = y + ky
+                k_row_off: int = (ky + ry) * kw
+                kx: int = -rx
+                while kx <= rx:
+                    sx: int = x + kx
+                    weight: float = kernel[k_row_off + (kx + rx)]
+                    if weight != 0.0:
+                        px: Pixel = sample_with_border(img, sx, sy, border_mode, const_zero)
+                        acc_r = acc_r + weight * float(px.r)
+                        acc_g = acc_g + weight * float(px.g)
+                        acc_b = acc_b + weight * float(px.b)
+                    kx = kx + 1
+                ky = ky + 1
+
+            out_r: int = clamp_u8(int(nox.mathx.floor(acc_r / divisor + bias + 0.5)))
+            out_g: int = clamp_u8(int(nox.mathx.floor(acc_g / divisor + bias + 0.5)))
+            out_b: int = clamp_u8(int(nox.mathx.floor(acc_b / divisor + bias + 0.5)))
+            out_a: int = 255
+            if has_a:
+                out_a = center_a
+            out_mut.set_pixel(x, y, Pixel.rgba(out_r, out_g, out_b, out_a))
+            x = x + 1
+        y = y + 1
+
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res

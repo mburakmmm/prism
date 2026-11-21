@@ -3,9 +3,9 @@
 > **Verified with:** `noxc 2.2.38` (`/Users/melihburakmemis/.nox-lang/bin/noxc`)  
 > **Host verified:** macOS arm64 (Apple Silicon) — LLVM and QBE backends  
 > **Date:** 2026-11-21  
-> **Active Release:** `v0.5.0` (Phases F0–F5 MVP Milestone Complete)
+> **Active Release:** `v0.6.0` (Phases F0–F6 Complete)
 
-## 1. Core Pixel, I/O, Geometry, PNG & Color/Metadata Capabilities (`v0.5.0`)
+## 1. Core Pixel, I/O, Geometry, PNG, Color/Metadata & Filter Capabilities (`v0.6.0`)
 
 | Capability | Status | Module | Backends Verified | Notes |
 |---|---|---|---|---|
@@ -22,6 +22,8 @@
 | Flip, Transpose, Rotate (`90`/`180`/`270`/arbitrary) & EXIF Orientation 1–8 | **VERIFIED** | `transforms/flip.nox`, `transforms/rotate.nox` | LLVM, QBE, Freestanding | Exact 90-degree fast-paths, orientation tag reset, and expanded arbitrary rotation |
 | Resampling (`NEAREST`, `BILINEAR`, `BICUBIC`, `LANCZOS2`, `LANCZOS3`, `AREA`) & Fit Modes (`FILL`, `CONTAIN`, `COVER`, `INSIDE`, `OUTSIDE`, `thumbnail`) | **VERIFIED** | `transforms/resample.nox`, `transforms/resize.nox` | LLVM, QBE, Freestanding | `x+0.5` pixel-center convention, alpha-halo prevention, and optional linear-light mode |
 | 2D Affine Transform (`AffineMatrix2D`, `affine_transform`) | **VERIFIED** | `transforms/affine.nox` | LLVM, QBE, Freestanding | Invertible 2x3 matrix with NaN/Inf and singularity rejection |
+| Point Enhancement, Effects, Quality Metrics (MSE/MAE/PSNR/SSIM) & Perceptual Hashes | **VERIFIED** | `filters/enhance.nox`, `filters/effects.nox` | LLVM, QBE, Freestanding | `grayscale`, `invert`, `threshold`, `posterize`, `solarize`, `brightness`, `contrast`, `saturation`, `gamma_correct`, `apply_lut`, `split_channels`, `merge_channels`, `sepia`, `pixelate`, `vignette`, `compute_channel_stats`, `histogram_equalize`, `image_psnr`, `image_ssim`, `average_hash`, `difference_hash` |
+| 2D Convolution, Separable Gaussian/Box Blur, Sharpen, Edges, Median & Morphology | **VERIFIED** | `filters/convolution.nox`, `filters/gaussian.nox`, `filters/sharpen.nox`, `filters/edges.nox`, `filters/median.nox`, `filters/morphology.nox` | LLVM, QBE, Freestanding | `convolve`, `gaussian_blur`, `box_blur`, `sharpen`, `unsharp_mask`, `sobel`, `prewitt`, `laplacian`, `emboss`, `median_filter`, `erode`, `dilate`, `morphology_open`, `morphology_close` |
 | Pure-NOX Zlib (RFC 1950), DEFLATE (RFC 1951), CRC-32 & Adler-32 | **VERIFIED** | `codecs/deflate.nox` | LLVM, QBE, Freestanding | Stored (BTYPE 0), Fixed Huffman (BTYPE 1), Dynamic Huffman (BTYPE 2) + LZ77 compressor |
 | Pure-NOX 8-bit PNG Engine (`probe_png`, `decode_png`, `encode_png`) | **VERIFIED** | `codecs/png.nox` | LLVM, QBE | Color Types 0, 2, 3 (`PLTE`+`tRNS`), 4, 6; Scanline Filters 0–4; `eXIf`/`iCCP`/`tEXt` hygiene & autorotate |
 
@@ -42,9 +44,9 @@
 
 | Target / Profile | Core, Transform, Metadata & DEFLATE Kernels | File I/O (`PPM`/`PGM`/`BMP`/`PNG`) | Concurrency (`spawn`) | Status |
 |---|---|---|---|---|
-| **macOS arm64 (LLVM)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | 8 test suites passed (`noxc 2.2.38`) |
-| **macOS arm64 (QBE)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | 8 test suites passed (`noxc 2.2.38`) |
-| **Freestanding (`--profile freestanding`)** | **VERIFIED** (`core/*`, `transforms/*`, `codecs/deflate.nox`, `codecs/sniff.nox`, `codecs/registry.nox`) | N/A (No OS FS) | N/A | 19 pure modules pass freestanding type-check |
+| **macOS arm64 (LLVM)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | 9 test suites passed (`noxc 2.2.38`) |
+| **macOS arm64 (QBE)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | 9 test suites passed (`noxc 2.2.38`) |
+| **Freestanding (`--profile freestanding`)** | **VERIFIED** (`core/*`, `transforms/*`, `filters/*`, `codecs/deflate.nox`, `codecs/sniff.nox`, `codecs/registry.nox`) | N/A (No OS FS) | N/A | 27 pure modules pass freestanding type-check |
 | **Linux x64 / arm64** | CI Configured | CI Configured | CI Configured | `NOT VERIFIED` locally (workflow in `.github/workflows/ci.yml`) |
 | **Windows x64** | CI Configured | CI Configured | CI Configured | `NOT VERIFIED` locally (workflow in `.github/workflows/ci.yml`) |
 | **WASM (`wasm32-wasi` / `wasm32-freestanding`)** | Planned (F14) | WASI/VFS only | Mode-dependent | Planned for Phase F14 (`v0.9.8`) |

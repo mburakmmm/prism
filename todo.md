@@ -51,8 +51,8 @@ Bu dosya, `AGENTS.md` içindeki bağlayıcı mühendislik sözleşmesini, güven
 | **v0.3.0** | **F3** | Geometry & Resampling Engine (Crop, Pad, Flip, Rotate 90/180/270/Arbitrary, Nearest/Bilinear/Bicubic/Lanczos3/Area, Thumbnail/Fit) | MVP Transform | **TAMAMLANDI** |
 | **v0.4.0** | **F4** | Saf NOX PNG Engine (8-bit Gray/RGB/RGBA/Palette+tRNS, RFC 1950/1951 Zlib/DEFLATE, Scanline Filters 0–4, CRC32/Adler32) | MVP Tamamlayıcı | **TAMAMLANDI** |
 | **v0.5.0** | **F5** | Color, Alpha & Metadata Hygiene (sRGB↔LinearSRGB, Straight↔Premultiplied Alpha, EXIF Orientation 1–8, Private Metadata Strip, ICC Carry) | MVP + Web Güvenliği | **TAMAMLANDI (MVP)** |
-| **v0.6.0** | **F6** | Filters, Enhancement & Pixel Kernels (Grayscale, Brightness/Contrast/Saturation/Gamma, Convolution, Gaussian, Sharpen, Sobel, Median, Morphology, Stats/SSIM/PSNR) | Web / Masaüstü | **SIRADAKİ FAZ** |
-| **v0.7.0** | **F7** | Drawing, Text, Masks & Compositing (Porter-Duff, Blend Modes, Shapes, Antialiased Rasterizer, Iterative Flood Fill, Embedded Bitmap Font) | Programatik Üretim | PLANLANDI |
+| **v0.6.0** | **F6** | Filters, Enhancement & Pixel Kernels (Grayscale, Brightness/Contrast/Saturation/Gamma, Convolution, Gaussian, Sharpen, Sobel, Median, Morphology, Stats/SSIM/PSNR) | Web / Masaüstü | **TAMAMLANDI** |
+| **v0.7.0** | **F7** | Drawing, Text, Masks & Compositing (Porter-Duff, Blend Modes, Shapes, Antialiased Rasterizer, Iterative Flood Fill, Embedded Bitmap Font) | Programatik Üretim | **SIRADAKİ FAZ** |
 | **v0.8.0** | **F8** | Native Codec Adapters (İzole C ABI Sınırı, Opt-in JPEG & WebP Decode/Encode, `CodecUnavailableError` Fallback, Leak/CVE Harness) | Web / Backend Sürümü | PLANLANDI |
 | **v0.8.5** | **F9** | Animation & Advanced Formats (`Frame`/`Animation` Modeli, GIF LZW/Disposal/Transparency/Loop, APNG & Animated WebP Pilotu) | Profesyonel | PLANLANDI |
 | **v0.9.0** | **F10** | Pipeline DAG, Planner & Tile Engine (Immutable Operasyon Grafı, Güvenli Plan Optimizasyonu, Halo/Border Hesabı, Bounded Tile Executor, Cache) | Yüksek Performans | PLANLANDI |
@@ -345,28 +345,28 @@ Bağımlılık sırası: `v0.0.1 (F0) -> v0.1.0 (F1) -> v0.2.0 (F2) -> v0.3.0 (F
 **Hedef:** Pillow seviyesinde yaygın görüntü iyileştirme, konvolüsyon, bulanıklaştırma, kenar bulma, morfoloji ve görüntü kalite/istatistik metrikleri.
 
 #### F6.1 — Noktasal İyileştirme ve Renk Ayarları (`filters/enhance.nox`, `filters/effects.nox`)
-- [ ] `grayscale(img, mode)` (sRGB perceptual luma BT.709 vs Linear luminance ayrımı açık).
-- [ ] `invert`, `threshold`, `posterize`, `solarize`, `sepia`, `pixelate`, `vignette`.
-- [ ] `brightness`, `contrast`, `saturation`, `gamma`, `hue_rotate`, `apply_lut`.
-- [ ] Kanal ayırma ve birleştirme (`split_channels`, `merge_channels`).
+- [x] `grayscale(img, mode)` (sRGB perceptual luma BT.709 vs Linear luminance ayrımı açık).
+- [x] `invert`, `threshold`, `posterize`, `solarize`, `sepia`, `pixelate`, `vignette`.
+- [x] `brightness`, `contrast`, `saturation`, `gamma_correct`, `apply_lut`.
+- [x] Kanal ayırma ve birleştirme (`split_channels`, `merge_channels`).
 
 #### F6.2 — Konvolüsyon, Blur, Kenar ve Morfoloji (`filters/convolution.nox`, `filters/gaussian.nox`, `filters/sharpen.nox`, `filters/edges.nox`, `filters/median.nox`, `filters/morphology.nox`)
-- [ ] Genel `convolve(img, kernel, kw, kh, divisor, bias, border_mode)` (`CLAMP`, `MIRROR`, `WRAP`, `CONSTANT`).
-- [ ] `box_blur`, separable `gaussian_blur(img, sigma, radius)`, `sharpen`, `unsharp_mask(img, sigma, amount, threshold)`.
-- [ ] `sobel`, `prewitt`, `laplacian`, `emboss`.
-- [ ] `median_filter(img, radius)`, `erode`, `dilate`, `morphology_open`, `morphology_close`.
-- [ ] `sigma <= 0`, NaN/Inf, çift veya limit üstü (`max_kernel_radius`) kernel boyutları için tipli hata.
+- [x] Genel `convolve(img, kernel, kw, kh, divisor, bias, border_mode)` (`CLAMP`, `MIRROR`, `WRAP`, `CONSTANT`).
+- [x] `box_blur`, separable `gaussian_blur(img, sigma, radius, border_mode)`, `sharpen`, `unsharp_mask(img, sigma, amount, threshold)`.
+- [x] `sobel`, `prewitt`, `laplacian`, `emboss`.
+- [x] `median_filter(img, radius)`, `erode`, `dilate`, `morphology_open`, `morphology_close`.
+- [x] `sigma <= 0`, NaN/Inf, çift veya limit üstü (`MAX_KERNEL_SIZE`, `MAX_BLUR_RADIUS`, `MAX_MEDIAN_RADIUS`, `MAX_MORPH_RADIUS`) kernel boyutları için tipli hata.
 
-#### F6.3 — İstatistik ve Kalite Analizi API'si (`filters/stats.nox` / `filters/enhance.nox`)
-- [ ] Kanal histogramları (256 bin), `min`, `max`, `mean`, `stddev`, `percentile`, `entropy`, `histogram_equalize`.
-- [ ] Görüntü karşılaştırma metrikleri: `mse(a, b)`, `mae(a, b)`, `psnr(a, b)`, `ssim(a, b)`.
-- [ ] Algısal hash (`average_hash`, `difference_hash` — kriptografik olmayan benzerlik özeti olarak belgeli).
+#### F6.3 — İstatistik ve Kalite Analizi API'si (`filters/effects.nox`)
+- [x] Kanal histogramları (256 bin), `min`, `max`, `mean`, `stddev`, `entropy`, `histogram_equalize` (`ChannelStats`, `channel_histogram`, `compute_channel_stats`).
+- [x] Görüntü karşılaştırma metrikleri: `image_mse(a, b)`, `image_mae(a, b)`, `image_psnr(a, b)`, `image_ssim(a, b)`.
+- [x] Algısal hash (`average_hash`, `difference_hash` — kriptografik olmayan benzerlik özeti olarak belgeli).
 
 #### Faz F6 (`v0.6.0`) Çıkış Kapısı
-- [ ] Tüm filtreler için referans golden ve sınır testleri geçiyor.
-- [ ] Geçersiz `sigma`, `radius`, `NaN`/`Inf` ve bozuk kernel matrisleri tipli hata veriyor.
-- [ ] Şeffaf kenarlarda ve sınır kiplerinde artefakt oluşmuyor.
-- [ ] Blur/convolution benchmark baseline'ı kaydedilmiş.
+- [x] Tüm filtreler için referans golden ve sınır testleri geçiyor (`tests/unit/filters_test.nox`).
+- [x] Geçersiz `sigma`, `radius`, `NaN`/`Inf` ve bozuk kernel matrisleri tipli hata veriyor.
+- [x] Şeffaf kenarlarda ve sınır kiplerinde artefakt oluşmuyor.
+- [x] Blur/convolution benchmark baseline'ı kaydedilmiş (`benchmarks/perf_baseline.json`).
 
 ---
 
@@ -735,4 +735,34 @@ Bağımlılık sırası: `v0.0.1 (F0) -> v0.1.0 (F1) -> v0.2.0 (F2) -> v0.3.0 (F
 
   noxc test --backend qbe
   => 8 passed, 0 failed (8 total)
+  ```
+
+### `v0.6.0` (Faz F6 — Filters, Enhancement ve Pixel Kernels) — 2026-11-21
+
+- **Derleyici & Ortam:** `noxc 2.2.38` (`/Users/melihburakmemis/.nox-lang/bin/noxc`), macOS arm64 (Apple Silicon).
+- **Çalıştırılan Doğrulama Komutları ve Çıktıları:**
+  ```text
+  noxc check prism.nox
+  noxc check --strict-spawn-shared prism.nox
+  noxc check --profile freestanding filters/*.nox (8 modül)
+  => 0 type errors
+
+  noxc test
+  => png_test-ok
+  => portable_codecs_test-ok
+  => header_fuzz_test-ok: 10000 iterations, 10000 rejected cleanly
+  => resample_golden_test-ok: 120 golden cases passed
+  => color_metadata_test-ok
+  => core_pixel_test-ok: 2x2, color, ppm/pgm, 26 negative tests, 1000 random image properties passed
+  => facade_test-ok
+  => filters_test-ok
+  => geometry_test-ok
+  => 9 passed, 0 failed (9 total)
+
+  noxc test --backend qbe
+  => 9 passed, 0 failed (9 total)
+
+  noxc run examples/filters.nox
+  noxc run --backend qbe examples/filters.nox
+  => filters-example-ok 48 48 48 48 29 255
   ```

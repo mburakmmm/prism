@@ -1,0 +1,244 @@
+import nox.mathx
+import nox.test
+from prism import BorderMode, ChannelStats, DimensionError, GrayscaleMode, Image, InvalidImageError, MutableImage, Pixel, PixelFormat, ResourceLimitError, ResourceLimits, apply_lut, average_hash, box_blur, brightness, channel_histogram, compute_channel_stats, contrast, convolve, difference_hash, dilate, emboss, erode, gamma_correct, gaussian_blur, gaussian_kernel_1d, grayscale, histogram_equalize, image_mae, image_mse, image_psnr, image_ssim, invert, laplacian, median_filter, merge_channels, morphology_close, morphology_open, new_image, pixelate, posterize, prewitt, saturation, sepia, sharpen, sobel, solarize, split_channels, threshold, unsharp_mask, vignette
+
+def test_point_enhancement_and_channel_split_merge() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+    mut_img: MutableImage = MutableImage.create(4, 4, PixelFormat.RGBA8, Pixel.transparent(), lim)
+    y: int = 0
+    while y < 4:
+        x: int = 0
+        while x < 4:
+            mut_img.set_pixel(x, y, Pixel.rgba(x * 60 + 20 & 255, y * 60 + 40 & 255, (x + y) * 35 + 10 & 255, 200))
+            x = x + 1
+        y = y + 1
+    src: Image = mut_img.to_image()
+
+    # 1. invert twice == identity, and alpha preserved
+    inv1: Image = invert(src)
+    nox.test.assert_eq_int(inv1.get_pixel(0, 0).a, 200, "invert preserves alpha")
+    inv2: Image = invert(inv1)
+    nox.test.assert_true(inv2.pixel_equals(src), "invert(invert(img)) == img")
+
+    # 2. Grayscale sRGB luma vs Linear luminance
+    pure_red: Image = new_image(2, 2, Pixel.rgba(255, 0, 0, 255))
+    g_srgb: Image = grayscale(pure_red, GrayscaleMode.SRGB_LUMA)
+    g_lin: Image = grayscale(pure_red, GrayscaleMode.LINEAR_LUMINANCE)
+    # In sRGB luma, 0.2126 * 255 = 54; in linear light, sRGB(0.2126) is ~127!
+    nox.test.assert_eq_int(g_srgb.get_pixel(0, 0).r, 54, "SRGB_LUMA pure red = 54")
+    nox.test.assert_true(g_lin.get_pixel(0, 0).r > g_srgb.get_pixel(0, 0).r, "LINEAR_LUMINANCE pure red > SRGB_LUMA")
+
+    # 3. threshold, posterize, solarize, brightness, contrast, saturation, gamma_correct
+    th_img: Image = threshold(src, 100)
+    t_px: Pixel = th_img.get_pixel(0, 0)
+    nox.test.assert_true(t_px.r == 0 or t_px.r == 255, "threshold produces binary 0 or 255")
+
+    post_img: Image = posterize(src, 1)
+    nox.test.assert_true(post_img.get_pixel(2, 2).r & 127 == 0, "1-bit posterize clears low 7 bits")
+
+    sol_img: Image = solarize(new_image(1, 1, Pixel.rgba(200, 100, 50, 255)), 150)
+    nox.test.assert_eq_int(sol_img.get_pixel(0, 0).r, 55, "solarize inverts channel >= 150")
+    nox.test.assert_eq_int(sol_img.get_pixel(0, 0).g, 100, "solarize preserves channel < 150")
+
+    br_img: Image = brightness(new_image(1, 1, Pixel.rgba(100, 240, 10, 255)), 30)
+    nox.test.assert_true(br_img.get_pixel(0, 0).equals(Pixel.rgba(130, 255, 40, 255)), "brightness clamping")
+
+    ct_zero: Image = contrast(src, 0.0)
+    nox.test.assert_true(ct_zero.get_pixel(1, 2).equals(Pixel.rgba(128, 128, 128, 200)), "contrast(0.0) maps RGB to midpoint 128")
+
+    sat_zero: Image = saturation(src, 0.0)
+    s_px: Pixel = sat_zero.get_pixel(1, 2)
+    nox.test.assert_true(s_px.r == s_px.g and s_px.g == s_px.b, "saturation(0.0) desaturates to grayscale luma")
+
+    gam_id: Image = gamma_correct(src, 1.0)
+    nox.test.assert_true(gam_id.pixel_equals(src), "gamma_correct(1.0) is identity")
+
+    # 4. split_channels & merge_channels round-trip
+    planes: list[Image] = split_channels(src)
+    nox.test.assert_eq_int(len(planes), 4, "RGBA8 splits into 4 GRAY8 planes")
+    merged: Image = merge_channels(planes)
+    nox.test.assert_true(merged.pixel_equals(src), "merge_channels(split_channels(img)) == img")
+
+    # 5. sepia, pixelate, vignette
+    sep_img: Image = sepia(new_image(2, 2, Pixel.rgba(120, 120, 120, 255)))
+    nox.test.assert_true(sep_img.get_pixel(0, 0).r > sep_img.get_pixel(0, 0).b, "sepia warm tone R > B")
+    pix_img: Image = pixelate(src, 2)
+    nox.test.assert_true(pix_img.get_pixel(0, 0).equals(pix_img.get_pixel(1, 1)), "pixelate 2x2 block uniformity")
+    vig_img: Image = vignette(new_image(5, 5, Pixel.rgba(200, 200, 200, 255)), 0.5)
+    nox.test.assert_true(vig_img.get_pixel(0, 0).r < vig_img.get_pixel(2, 2).r, "vignette darkens corner relative to center")
+
+def test_convolution_gaussian_edges_median_and_morphology() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+
+    # 1. Identity 3x3 convolution
+    src: Image = new_image(5, 5, Pixel.rgba(80, 140, 200, 255))
+    id_kernel: list[float] = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+    conv_id: Image = convolve(src, id_kernel, 3, 3, 1.0, 0.0, BorderMode.CLAMP)
+    nox.test.assert_true(conv_id.pixel_equals(src), "3x3 identity convolution")
+
+    # 2. Separable Gaussian blur vs 2D reference Gaussian convolution consistency (F6 acceptance criterion)
+    k1d: list[float] = gaussian_kernel_1d(1.0, 1)
+    k2d: list[float] = []
+    ky: int = 0
+    while ky < 3:
+        kx: int = 0
+        while kx < 3:
+            k2d.append(k1d[ky] * k1d[kx])
+            kx = kx + 1
+        ky = ky + 1
+
+    grad_mut: MutableImage = MutableImage.create(6, 6, PixelFormat.RGB8, Pixel.black(), lim)
+    gy: int = 0
+    while gy < 6:
+        gx: int = 0
+        while gx < 6:
+            grad_mut.set_pixel(gx, gy, Pixel.rgb(gx * 40, gy * 40, (gx + gy) * 20))
+            gx = gx + 1
+        gy = gy + 1
+    grad_img: Image = grad_mut.to_image()
+
+    sep_gauss: Image = gaussian_blur(grad_img, 1.0, 1, BorderMode.CLAMP)
+    ref_gauss: Image = convolve(grad_img, k2d, 3, 3, 1.0, 0.0, BorderMode.CLAMP)
+    nox.test.assert_true(image_mae(sep_gauss, ref_gauss) <= 1.0, "separable 2-pass Gaussian blur matches 2D reference convolution within 1 LSB")
+
+    # 3. Transparent edge artifact test for Gaussian blur & box blur
+    edge_mut: MutableImage = MutableImage.create(4, 2, PixelFormat.RGBA8, Pixel.transparent(), lim)
+    edge_mut.set_pixel(2, 0, Pixel.rgba(255, 0, 0, 255))
+    edge_mut.set_pixel(3, 0, Pixel.rgba(255, 0, 0, 255))
+    edge_mut.set_pixel(2, 1, Pixel.rgba(255, 0, 0, 255))
+    edge_mut.set_pixel(3, 1, Pixel.rgba(255, 0, 0, 255))
+    edge_src: Image = edge_mut.to_image()
+    blur_edge: Image = gaussian_blur(edge_src, 1.2, 2, BorderMode.CLAMP)
+    nox.test.assert_eq_int(blur_edge.get_pixel(1, 0).r, 255, "Gaussian blur on transparent boundary preserves pure red R=255 without dark halo")
+    box_edge: Image = box_blur(edge_src, 1, BorderMode.CLAMP)
+    nox.test.assert_eq_int(box_edge.get_pixel(1, 0).r, 255, "box_blur on transparent boundary preserves pure red R=255")
+
+    # 4. Sobel, Prewitt, Laplacian, Emboss, Sharpen, Unsharp Mask
+    step_mut: MutableImage = MutableImage.create(6, 6, PixelFormat.GRAY8, Pixel.gray(20), lim)
+    step_mut.fill_rect(3, 0, 3, 6, Pixel.gray(220))
+    step_img: Image = step_mut.to_image()
+
+    sob_img: Image = sobel(step_img)
+    nox.test.assert_eq_int(sob_img.get_pixel(0, 3).r, 0, "Sobel flat region is 0")
+    nox.test.assert_true(sob_img.get_pixel(2, 3).r > 150, "Sobel vertical step edge is strong")
+
+    pre_img: Image = prewitt(step_img)
+    nox.test.assert_true(pre_img.get_pixel(2, 3).r > 150, "Prewitt vertical step edge is strong")
+
+    lap_img: Image = laplacian(step_img)
+    nox.test.assert_eq_int(lap_img.get_pixel(0, 3).r, 0, "Laplacian flat region is 0")
+
+    emb_img: Image = emboss(step_img)
+    nox.test.assert_eq_int(emb_img.get_pixel(0, 3).r, 128, "Emboss flat region is bias 128")
+
+    sh_img: Image = sharpen(step_img, 1.0)
+    usm_img: Image = unsharp_mask(step_img, 1.0, 1.0, 5)
+    nox.test.assert_true(sh_img.get_pixel(3, 3).r >= 220, "sharpen boosts bright side of edge")
+    nox.test.assert_true(usm_img.get_pixel(3, 3).r >= 220, "unsharp_mask boosts bright side of edge")
+
+    # 5. Median filter & Morphology (erode, dilate, open, close) on salt impulse noise
+    noisy_mut: MutableImage = MutableImage.create(5, 5, PixelFormat.GRAY8, Pixel.gray(40), lim)
+    noisy_mut.set_pixel(2, 2, Pixel.gray(255))
+    noisy_img: Image = noisy_mut.to_image()
+
+    med_clean: Image = median_filter(noisy_img, 1)
+    nox.test.assert_eq_int(med_clean.get_pixel(2, 2).r, 40, "median_filter removes isolated salt spike")
+
+    dil_img: Image = dilate(noisy_img, 1)
+    nox.test.assert_eq_int(dil_img.get_pixel(1, 1).r, 255, "dilate expands bright pixel to 3x3")
+    er_img: Image = erode(noisy_img, 1)
+    nox.test.assert_eq_int(er_img.get_pixel(2, 2).r, 40, "erode removes isolated bright pixel")
+    open_img: Image = morphology_open(noisy_img, 1)
+    nox.test.assert_eq_int(open_img.get_pixel(2, 2).r, 40, "morphology_open removes isolated bright salt noise")
+
+    hole_mut: MutableImage = MutableImage.create(5, 5, PixelFormat.GRAY8, Pixel.gray(200), lim)
+    hole_mut.set_pixel(2, 2, Pixel.gray(0))
+    close_img: Image = morphology_close(hole_mut.to_image(), 1)
+    nox.test.assert_eq_int(close_img.get_pixel(2, 2).r, 200, "morphology_close fills isolated dark hole")
+
+def test_stats_quality_metrics_and_invalid_filter_inputs() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+
+    # 50/50 two-value checkerboard: min=0, max=200, mean=100.0, stddev=100.0, entropy=1.0 bit
+    chk_mut: MutableImage = MutableImage.create(4, 4, PixelFormat.GRAY8, Pixel.gray(0), lim)
+    y: int = 0
+    while y < 4:
+        x: int = 0
+        while x < 4:
+            if (x + y) % 2 == 1:
+                chk_mut.set_pixel(x, y, Pixel.gray(200))
+            x = x + 1
+        y = y + 1
+    chk_img: Image = chk_mut.to_image()
+
+    hist: list[int] = channel_histogram(chk_img, 0)
+    nox.test.assert_eq_int(hist[0], 8, "histogram bin 0 count")
+    nox.test.assert_eq_int(hist[200], 8, "histogram bin 200 count")
+
+    st: ChannelStats = compute_channel_stats(chk_img, 0)
+    nox.test.assert_eq_int(st.min_val, 0, "stats min_val")
+    nox.test.assert_eq_int(st.max_val, 200, "stats max_val")
+    nox.test.assert_true(nox.mathx.abs(st.mean - 100.0) < 1.0e-6, "stats mean == 100.0")
+    nox.test.assert_true(nox.mathx.abs(st.stddev - 100.0) < 1.0e-6, "stats stddev == 100.0")
+    nox.test.assert_true(nox.mathx.abs(st.entropy - 1.0) < 1.0e-5, "stats entropy == 1.0 bit")
+
+    eq_img: Image = histogram_equalize(chk_img)
+    nox.test.assert_eq_int(eq_img.get_pixel(1, 0).r, 255, "histogram_equalize stretches upper value to 255")
+
+    # MSE, MAE, PSNR, SSIM, aHash, dHash
+    nox.test.assert_true(image_mse(chk_img, chk_img) == 0.0, "identical image MSE == 0.0")
+    nox.test.assert_true(image_mae(chk_img, chk_img) == 0.0, "identical image MAE == 0.0")
+    nox.test.assert_true(image_psnr(chk_img, chk_img) == 100.0, "identical image PSNR == 100.0 dB")
+    nox.test.assert_true(nox.mathx.abs(image_ssim(chk_img, chk_img) - 1.0) < 1.0e-6, "identical image SSIM == 1.0")
+    nox.test.assert_eq_int(average_hash(chk_img), average_hash(chk_img.clone()), "average_hash deterministic")
+    nox.test.assert_eq_int(difference_hash(chk_img), difference_hash(chk_img.clone()), "difference_hash deterministic")
+
+    # Negative tests for sigma/kernel/NaN/bounds (F6 acceptance criterion)
+    nan_val: float = 0.0 / 0.0
+
+    c_sig0: bool = False
+    try:
+        gaussian_blur(chk_img, 0.0, 1, BorderMode.CLAMP)
+    except InvalidImageError:
+        c_sig0 = True
+    nox.test.assert_true(c_sig0, "gaussian_blur sigma=0.0 rejected")
+
+    c_signan: bool = False
+    try:
+        gaussian_blur(chk_img, nan_val, 1, BorderMode.CLAMP)
+    except DimensionError:
+        c_signan = True
+    nox.test.assert_true(c_signan, "gaussian_blur sigma=NaN rejected")
+
+    c_even_k: bool = False
+    try:
+        convolve(chk_img, [1.0, 0.0, 0.0, 1.0], 2, 2, 1.0, 0.0, BorderMode.CLAMP)
+    except DimensionError:
+        c_even_k = True
+    nox.test.assert_true(c_even_k, "even 2x2 convolution kernel rejected")
+
+    c_big_k: bool = False
+    try:
+        convolve(chk_img, [1.0], 33, 33, 1.0, 0.0, BorderMode.CLAMP)
+    except ResourceLimitError:
+        c_big_k = True
+    nox.test.assert_true(c_big_k, "oversized 33x33 kernel rejected by MAX_KERNEL_SIZE")
+
+    c_nan_k: bool = False
+    try:
+        convolve(chk_img, [0.0, 0.0, 0.0, 0.0, nan_val, 0.0, 0.0, 0.0, 0.0], 3, 3, 1.0, 0.0, BorderMode.CLAMP)
+    except DimensionError:
+        c_nan_k = True
+    nox.test.assert_true(c_nan_k, "NaN inside convolution kernel rejected")
+
+    c_bad_lut: bool = False
+    try:
+        apply_lut(chk_img, [0, 1, 2])
+    except InvalidImageError:
+        c_bad_lut = True
+    nox.test.assert_true(c_bad_lut, "LUT length != 256 rejected")
+
+test_point_enhancement_and_channel_split_merge()
+test_convolution_gaussian_edges_median_and_morphology()
+test_stats_quality_metrics_and_invalid_filter_inputs()
+print("filters_test-ok")

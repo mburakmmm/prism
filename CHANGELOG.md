@@ -2,6 +2,16 @@
 
 All notable changes to Prism are documented in this file. Prism follows Semantic Versioning (`0.x` experimental phase gates leading to `1.0.0`).
 
+## [0.6.0] — 2026-11-21 (Phase F6 Filters, Enhancement & Pixel Kernels)
+
+### Added
+
+- `filters/enhance.nox`: Point enhancement and channel operations (`GrayscaleMode.SRGB_LUMA`, `GrayscaleMode.LINEAR_LUMINANCE`, `grayscale`, `invert`, `threshold`, `posterize`, `solarize`, `brightness`, `contrast`, `saturation`, `gamma_correct`, `apply_lut`, `split_channels`, `merge_channels`).
+- `filters/effects.nox`: Photographic effects (`sepia`, `pixelate`, `vignette`), per-channel statistics (`ChannelStats`, `channel_histogram`, `compute_channel_stats`, `histogram_equalize`), image quality comparison metrics (`image_mse`, `image_mae`, `image_psnr`, `image_ssim`), and non-cryptographic perceptual hashes (`average_hash`, `difference_hash`).
+- `filters/convolution.nox` & `filters/gaussian.nox`: General odd-sized 2D kernel convolution (`convolve` with `MAX_KERNEL_SIZE = 31` and `BorderMode` support), `gaussian_kernel_1d`, alpha-safe separable 2-pass `box_blur` and `gaussian_blur` (`MAX_BLUR_RADIUS = 32`).
+- `filters/sharpen.nox`, `filters/edges.nox`, `filters/median.nox`, `filters/morphology.nox`: `sharpen`, `unsharp_mask`, 3x3 gradient edge detectors (`sobel`, `prewitt`, `laplacian`, `emboss`), non-linear impulse noise filter (`median_filter`), and grayscale/per-channel morphological operators (`erode`, `dilate`, `morphology_open`, `morphology_close`).
+- `examples/filters.nox` & `tests/unit/filters_test.nox`: End-to-end filter showcase and unit/golden/boundary tests (including 2-pass separable Gaussian blur vs. 2D reference convolution consistency within 1 LSB and transparent edge halo tests) verified on both LLVM and QBE backends and under `--profile freestanding`.
+
 ## [0.5.0] — 2026-11-21 (Phase F5 Color, Alpha & Metadata Hygiene — MVP Complete)
 
 ### Added

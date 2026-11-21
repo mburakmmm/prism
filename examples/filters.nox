@@ -1,0 +1,29 @@
+import nox.fs
+import nox.os
+import nox.path
+from prism import BorderMode, ChannelStats, EncodeOptions, GrayscaleMode, Image, MutableImage, Pixel, PixelFormat, ResourceLimits, compute_channel_stats, gaussian_blur, grayscale, image_psnr, image_ssim, save_image, sharpen, sobel, unsharp_mask
+
+lim: ResourceLimits = ResourceLimits.default()
+canvas: MutableImage = MutableImage.create(48, 48, PixelFormat.RGBA8, Pixel.rgba(20, 30, 48, 255), lim)
+canvas.fill_rect(12, 12, 24, 24, Pixel.rgba(240, 180, 60, 255))
+canvas.fill_rect(20, 20, 8, 8, Pixel.rgba(255, 255, 255, 255))
+src: Image = canvas.to_image()
+
+blurred: Image = gaussian_blur(src, 1.5, 0, BorderMode.CLAMP)
+sharpened: Image = unsharp_mask(blurred, 1.2, 1.0, 2)
+edges: Image = sobel(grayscale(src, GrayscaleMode.SRGB_LUMA))
+boosted: Image = sharpen(src, 0.5)
+
+psnr_blur: float = image_psnr(src, blurred)
+ssim_blur: float = image_ssim(src, blurred)
+luma_stats: ChannelStats = compute_channel_stats(src, -1)
+
+assert psnr_blur > 15.0 and psnr_blur < 60.0, "expected finite PSNR on blurred image"
+assert ssim_blur > 0.5 and ssim_blur < 1.0, "expected high SSIM on blurred image"
+assert luma_stats.max_val == 255 and luma_stats.min_val > 0, "luma stats range check"
+
+out_edges: str = nox.path.join(nox.os.current_dir(), "examples/edges_demo.png")
+save_image(edges, out_edges, EncodeOptions.overwrite_atomic())
+nox.fs.remove_file(out_edges)
+
+print("filters-example-ok", edges.width(), edges.height(), boosted.width(), sharpened.height(), luma_stats.min_val, luma_stats.max_val)

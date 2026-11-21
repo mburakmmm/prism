@@ -1,0 +1,71 @@
+import nox.mathx
+from core.color import clamp_u8
+from core.errors import InvalidImageError
+from core.image import Image, MutableImage
+from core.pixel import Pixel
+from filters.convolution import convolve
+from filters.gaussian import gaussian_blur
+from transforms.border import BorderMode
+from transforms.resample import require_finite_float
+
+__all__: list[str] = ["sharpen", "unsharp_mask"]
+
+def sharpen(img: Image, amount: float) -> Image:
+    """Sharpen an Image using a 3x3 Laplacian-boost kernel parameterized by amount >= 0.0."""
+    require_finite_float(amount, "amount")
+    if amount < 0.0 or amount > 20.0:
+        raise InvalidImageError("sharpen amount must be in range [0.0, 20.0]")
+    if nox.mathx.abs(amount) <= 1.0e-9:
+        return img.clone()
+
+    center: float = 1.0 + 4.0 * amount
+    neg: float = -amount
+    kernel: list[float] = [0.0, neg, 0.0, neg, center, neg, 0.0, neg, 0.0]
+    return convolve(img, kernel, 3, 3, 1.0, 0.0, BorderMode.CLAMP)
+
+def unsharp_mask(img: Image, sigma: float, amount: float, threshold_val: int) -> Image:
+    """Apply Unsharp Masking: img + amount * (img - gaussian_blur(img, sigma)) where |diff| >= threshold_val."""
+    require_finite_float(sigma, "sigma")
+    require_finite_float(amount, "amount")
+    if sigma <= 0.0 or sigma > 64.0:
+        raise InvalidImageError("unsharp_mask sigma must be in range (0.0, 64.0]")
+    if amount < 0.0 or amount > 20.0:
+        raise InvalidImageError("unsharp_mask amount must be in range [0.0, 20.0]")
+    if threshold_val < 0 or threshold_val > 255:
+        raise InvalidImageError("unsharp_mask threshold_val must be in range [0, 255]")
+
+    blurred: Image = gaussian_blur(img, sigma, 0, BorderMode.CLAMP)
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), Pixel.transparent(), img.limits)
+
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            orig_px: Pixel = img.get_pixel(x, y)
+            blur_px: Pixel = blurred.get_pixel(x, y)
+
+            dr: int = orig_px.r - blur_px.r
+            dg: int = orig_px.g - blur_px.g
+            db: int = orig_px.b - blur_px.b
+
+            nr: int = orig_px.r
+            ng: int = orig_px.g
+            nb: int = orig_px.b
+            if abs(dr) >= threshold_val:
+                nr = clamp_u8(int(float(orig_px.r) + amount * float(dr) + 0.5))
+            if abs(dg) >= threshold_val:
+                ng = clamp_u8(int(float(orig_px.g) + amount * float(dg) + 0.5))
+            if abs(db) >= threshold_val:
+                nb = clamp_u8(int(float(orig_px.b) + amount * float(db) + 0.5))
+
+            out_mut.set_pixel(x, y, Pixel.rgba(nr, ng, nb, orig_px.a))
+            x = x + 1
+        y = y + 1
+
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res

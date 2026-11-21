@@ -9,9 +9,9 @@ Prism is a zero-dependency, statically typed, resource-bounded image processing 
 [![CI Matrix](https://github.com/mburakmmm/prism/actions/workflows/ci.yml/badge.svg)](https://github.com/mburakmmm/prism/actions/workflows/ci.yml)
 [![Release Gate](https://github.com/mburakmmm/prism/actions/workflows/release.yml/badge.svg)](https://github.com/mburakmmm/prism/actions/workflows/release.yml)
 [![Security Gates](https://github.com/mburakmmm/prism/actions/workflows/security.yml/badge.svg)](https://github.com/mburakmmm/prism/actions/workflows/security.yml)
-[![Version](https://img.shields.io/badge/version-v0.5.0-orange.svg)](nox.json)
+[![Version](https://img.shields.io/badge/version-v0.6.0-orange.svg)](nox.json)
 [![Platform Support](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20Freestanding-blue.svg)](#-cross-platform--compatibility-matrix)
-[![Tests](https://img.shields.io/badge/tests-8%20suites%20%7C%2011%2C150%2B%20checks%20%28100%25%29-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-9%20suites%20%7C%2011%2C200%2B%20checks%20%28100%25%29-brightgreen.svg)](tests/)
 [![Compiler](https://img.shields.io/badge/noxc-2.2.38-purple.svg)](https://github.com/mburakmmm/nox-lang)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -87,6 +87,7 @@ Prism is a zero-dependency, statically typed, resource-bounded image processing 
 | **Magic-Byte Sniffing & I/O** | [`codecs/sniff.nox`](codecs/sniff.nox), [`adapters/file.nox`](adapters/file.nox) | Extension-independent `sniff_format`, `probe`, `decode`, `encode`, `open_image`, `save_image`, `open_image_confined` (`nox.path.safe_join`), no-clobber default, and atomic file replacement. |
 | **Geometry & Resampling** | [`transforms/resize.nox`](transforms/resize.nox), [`transforms/rotate.nox`](transforms/rotate.nox), [`transforms/affine.nox`](transforms/affine.nox) | `NEAREST`, `BILINEAR`, `BICUBIC`, `LANCZOS2`, `LANCZOS3`, `AREA`; `ResizeFit` (`FILL`, `CONTAIN`, `COVER`, `INSIDE`, `OUTSIDE`); `thumbnail`; `rotate90`/`180`/`270`/`rotate_arbitrary`; 2x3 `affine_transform`. |
 | **Color & EXIF Hygiene** | [`core/color.nox`](core/color.nox), [`core/metadata.nox`](core/metadata.nox) | `convert_color_space` (`SRGB` ↔ `LINEAR_SRGB`), `image_to_premultiplied`, `blend_images_source_over`, `parse_exif_buffer` (cyclic-IFD guard), `sanitize_exif_buffer` (GPS/Serial/MakerNote scrub), and `iCCP` carry-through. |
+| **Filters, Blur, Edges & Metrics** | [`filters/enhance.nox`](filters/enhance.nox), [`filters/gaussian.nox`](filters/gaussian.nox), [`filters/edges.nox`](filters/edges.nox), [`filters/effects.nox`](filters/effects.nox) | `grayscale`, `invert`, `threshold`, `posterize`, `solarize`, `brightness`, `contrast`, `saturation`, `gamma_correct`, `convolve`, `gaussian_blur`, `box_blur`, `sharpen`, `unsharp_mask`, `sobel`, `prewitt`, `laplacian`, `emboss`, `median_filter`, `erode`/`dilate`, `image_psnr`/`image_ssim`, `average_hash`/`difference_hash`. |
 
 ---
 
@@ -95,7 +96,7 @@ Prism is a zero-dependency, statically typed, resource-bounded image processing 
 Add Prism to your Nox project using `noxc add` or in `nox.json`:
 
 ```bash
-noxc add prism github.com/mburakmmm/prism --ref v0.5.0
+noxc add prism github.com/mburakmmm/prism --ref v0.6.0
 ```
 
 ```json
@@ -104,7 +105,7 @@ noxc add prism github.com/mburakmmm/prism --ref v0.5.0
   "version": "0.1.0",
   "entry": "main.nox",
   "requires": [
-    { "alias": "prism", "repo": "github.com/mburakmmm/prism", "ref": "v0.5.0" }
+    { "alias": "prism", "repo": "github.com/mburakmmm/prism", "ref": "v0.6.0" }
   ]
 }
 ```
@@ -272,7 +273,7 @@ Prism is continuously verified on every push, pull request, and release tag via 
 | **Ubuntu Linux** | x86_64, aarch64 | `noxc 2.2.38` (LLVM & QBE backends) | ✅ Passing |
 | **macOS** | Apple Silicon (arm64), Intel (x86_64) | `noxc 2.2.38` (LLVM & QBE backends) | ✅ Passing |
 | **Windows 10/11** | x86_64 | `noxc 2.2.38` (Windows hosted backend) | ✅ Passing |
-| **Freestanding Profile** | Target-agnostic (`--profile freestanding`) | `19` pure-Nox core, transform & DEFLATE modules | ✅ Passing |
+| **Freestanding Profile** | Target-agnostic (`--profile freestanding`) | `27` pure-Nox core, transform, filter & DEFLATE modules | ✅ Passing |
 
 ---
 
@@ -322,8 +323,9 @@ noxc test --backend qbe
 | **`v0.3.0`** | **F3** | Geometry, Affine & Alpha-Safe Resampling Engine (120 Golden Cases) | ✅ Released |
 | **`v0.4.0`** | **F4** | Pure-Nox 8-Bit PNG Engine (RFC 1950/1951 Zlib/DEFLATE, Scanline Filters 0–4) | ✅ Released |
 | **`v0.5.0`** | **F5** | Color, Alpha & EXIF Metadata Hygiene (MVP Milestone Complete) | ✅ Released |
-| **`v0.6.0`** | **F6** | Filters, Enhancement, Convolution, Gaussian Blur, Sobel, Morphology & PSNR/SSIM | 🔜 Next |
-| **`v0.7.0`–`v1.0.0`** | **F7–F16** | Drawing/Compositing, Optional Native JPEG/WebP, GIF Animation, Tile DAG Pipeline, CLI & 1.0 | 📋 Planned |
+| **`v0.6.0`** | **F6** | Filters, Enhancement, Convolution, Gaussian Blur, Sobel, Morphology & PSNR/SSIM | ✅ Released |
+| **`v0.7.0`** | **F7** | Drawing, Text (Embedded Bitmap Font), Masks & Porter-Duff / Blend Mode Compositing | 🔜 Next |
+| **`v0.8.0`–`v1.0.0`** | **F8–F16** | Optional Native JPEG/WebP, GIF Animation, Tile DAG Pipeline, CLI & 1.0 | 📋 Planned |
 
 ---
 

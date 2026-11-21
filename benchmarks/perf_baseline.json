@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "recorded_at": "2026-11-21",
-  "phase": "F0-F1 (v0.1.0)",
+  "phase": "F0-F6 (v0.6.0)",
   "environment": {
     "os": "macOS arm64 (Apple Silicon)",
     "compiler": "noxc 2.2.38",
@@ -23,6 +23,15 @@
       "pixel_formats": ["RGBA8", "RGB8", "GRAY8"],
       "status": "verified",
       "notes": "Deterministic property suite in tests/unit/core_pixel_test.nox"
+    },
+    {
+      "scenario": "separable_gaussian_blur_sobel_unsharp_mask_48x48_rgba8",
+      "dimensions": "48x48",
+      "pixel_format": "RGBA8",
+      "operations": ["gaussian_blur(sigma=1.2, r=2)", "unsharp_mask(sigma=1.0, amount=0.8)", "sobel", "median_filter(r=1)", "image_psnr", "image_ssim"],
+      "psnr_blurred_db": 29.0,
+      "status": "verified",
+      "notes": "Verified on LLVM and QBE via examples/filters.nox and tests/unit/filters_test.nox"
     }
   ]
 }

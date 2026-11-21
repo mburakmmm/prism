@@ -1,0 +1,392 @@
+import nox.mathx
+from core.color import clamp_u8
+from core.errors import DimensionError, InvalidImageError
+from core.image import Image, MutableImage
+from core.pixel import Pixel, PixelFormat
+from transforms.resample import ResampleFilter, require_finite_float
+from transforms.resize import resize_image
+
+__all__: list[str] = ["ChannelStats", "sepia", "pixelate", "vignette", "channel_histogram", "compute_channel_stats", "histogram_equalize", "image_mse", "image_mae", "image_psnr", "image_ssim", "average_hash", "difference_hash"]
+
+class ChannelStats:
+    """Statistical summary of an 8-bit image channel (R=0, G=1, B=2, A=3, Luma=-1)."""
+
+    min_val: int
+    max_val: int
+    mean: float
+    stddev: float
+    p50: int
+    p95: int
+    entropy: float
+
+    def __init__(self, min_val: int, max_val: int, mean: float, stddev: float, p50: int, p95: int, entropy: float) -> None:
+        self.min_val = min_val
+        self.max_val = max_val
+        self.mean = mean
+        self.stddev = stddev
+        self.p50 = p50
+        self.p95 = p95
+        self.entropy = entropy
+
+def sepia(img: Image) -> Image:
+    """Apply classic warm sepia tone transformation while preserving alpha."""
+    w: int = img.width()
+    h: int = img.height()
+    out_fmt: PixelFormat = PixelFormat.RGB8
+    if img.pixel_format().has_alpha():
+        out_fmt = PixelFormat.RGBA8
+    out_mut: MutableImage = MutableImage.create(w, h, out_fmt, Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            px: Pixel = img.get_pixel(x, y)
+            sr: int = clamp_u8((px.r * 393 + px.g * 769 + px.b * 189) // 1000)
+            sg: int = clamp_u8((px.r * 349 + px.g * 686 + px.b * 168) // 1000)
+            sb: int = clamp_u8((px.r * 272 + px.g * 534 + px.b * 131) // 1000)
+            out_mut.set_pixel(x, y, Pixel.rgba(sr, sg, sb, px.a))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def pixelate(img: Image, block_size: int) -> Image:
+    """Mosaic/pixelate an Image into uniform blocks of block_size x block_size."""
+    if block_size <= 0:
+        raise DimensionError("pixelate block_size must be positive: got " + str(block_size))
+    if block_size == 1:
+        return img.clone()
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), Pixel.transparent(), img.limits)
+    by: int = 0
+    while by < h:
+        by_end: int = by + block_size
+        if by_end > h:
+            by_end = h
+        bx: int = 0
+        while bx < w:
+            bx_end: int = bx + block_size
+            if bx_end > w:
+                bx_end = w
+            sample_px: Pixel = img.get_pixel((bx + bx_end - 1) // 2, (by + by_end - 1) // 2)
+            cy: int = by
+            while cy < by_end:
+                cx: int = bx
+                while cx < bx_end:
+                    out_mut.set_pixel(cx, cy, sample_px)
+                    cx = cx + 1
+                cy = cy + 1
+            bx = bx + block_size
+        by = by + block_size
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def vignette(img: Image, strength: float) -> Image:
+    """Darken outer corners smoothly with radial falloff controlled by strength in [0.0, 1.0]."""
+    require_finite_float(strength, "strength")
+    if strength < 0.0 or strength > 1.0:
+        raise InvalidImageError("vignette strength must be in range [0.0, 1.0]")
+    w: int = img.width()
+    h: int = img.height()
+    cx: float = (float(w) - 1.0) * 0.5
+    cy: float = (float(h) - 1.0) * 0.5
+    max_dist_sq: float = cx * cx + cy * cy
+    if max_dist_sq <= 1.0e-9:
+        return img.clone()
+
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        dy: float = float(y) - cy
+        x: int = 0
+        while x < w:
+            dx: float = float(x) - cx
+            norm_r2: float = (dx * dx + dy * dy) / max_dist_sq
+            gain: float = 1.0 - strength * norm_r2
+            if gain < 0.0:
+                gain = 0.0
+            px: Pixel = img.get_pixel(x, y)
+            out_mut.set_pixel(x, y, Pixel.rgba(clamp_u8(int(float(px.r) * gain + 0.5)), clamp_u8(int(float(px.g) * gain + 0.5)), clamp_u8(int(float(px.b) * gain + 0.5)), px.a))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def _extract_channel_val(px: Pixel, channel_idx: int) -> int:
+    if channel_idx == -1:
+        return px.luma_srgb()
+    if channel_idx == 0:
+        return px.r
+    if channel_idx == 1:
+        return px.g
+    if channel_idx == 2:
+        return px.b
+    if channel_idx == 3:
+        return px.a
+    raise InvalidImageError("channel_idx must be -1 (luma) or 0..3 (R,G,B,A)")
+
+def channel_histogram(img: Image, channel_idx: int) -> list[int]:
+    """Compute a 256-bin frequency histogram for channel_idx (-1=luma, 0=R, 1=G, 2=B, 3=A)."""
+    if channel_idx < -1 or channel_idx > 3:
+        raise InvalidImageError("channel_idx must be -1 (luma) or 0..3 (R,G,B,A)")
+    bins: list[int] = []
+    i: int = 0
+    while i < 256:
+        bins.append(0)
+        i = i + 1
+    w: int = img.width()
+    h: int = img.height()
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            v: int = _extract_channel_val(img.get_pixel(x, y), channel_idx)
+            bins[v] = bins[v] + 1
+            x = x + 1
+        y = y + 1
+    return bins
+
+def _percentile_from_hist(hist: list[int], total: int, pct: float) -> int:
+    target: int = int(float(total) * pct)
+    if target < 1:
+        target = 1
+    cum: int = 0
+    i: int = 0
+    while i < 256:
+        cum = cum + hist[i]
+        if cum >= target:
+            return i
+        i = i + 1
+    return 255
+
+def compute_channel_stats(img: Image, channel_idx: int) -> ChannelStats:
+    """Compute min, max, mean, stddev, p50, p95, and Shannon entropy (in bits) for a channel."""
+    hist: list[int] = channel_histogram(img, channel_idx)
+    total: int = img.width() * img.height()
+    min_v: int = 255
+    max_v: int = 0
+    sum_v: float = 0.0
+
+    i: int = 0
+    while i < 256:
+        cnt: int = hist[i]
+        if cnt > 0:
+            if i < min_v:
+                min_v = i
+            if i > max_v:
+                max_v = i
+            sum_v = sum_v + float(i) * float(cnt)
+        i = i + 1
+
+    mean_v: float = sum_v / float(total)
+    var_sum: float = 0.0
+    entropy_bits: float = 0.0
+    ln2: float = nox.mathx.ln(2.0)
+
+    i = 0
+    while i < 256:
+        cnt2: int = hist[i]
+        if cnt2 > 0:
+            diff: float = float(i) - mean_v
+            var_sum = var_sum + diff * diff * float(cnt2)
+            p: float = float(cnt2) / float(total)
+            entropy_bits = entropy_bits - p * (nox.mathx.ln(p) / ln2)
+        i = i + 1
+
+    std_v: float = nox.mathx.sqrt(var_sum / float(total))
+    p50: int = _percentile_from_hist(hist, total, 0.5)
+    p95: int = _percentile_from_hist(hist, total, 0.95)
+    return ChannelStats(min_v, max_v, mean_v, std_v, p50, p95, entropy_bits)
+
+def histogram_equalize(img: Image) -> Image:
+    """Perform global histogram equalization on perceptual luma while preserving chroma ratios and alpha."""
+    hist: list[int] = channel_histogram(img, -1)
+    total: int = img.width() * img.height()
+    cdf_min: int = 0
+    i: int = 0
+    while i < 256:
+        if hist[i] > 0:
+            cdf_min = hist[i]
+            break
+        i = i + 1
+
+    if total <= cdf_min:
+        return img.clone()
+
+    lut: list[int] = []
+    cum: int = 0
+    i = 0
+    while i < 256:
+        cum = cum + hist[i]
+        num: int = (cum - cdf_min) * 255
+        den: int = total - cdf_min
+        mapped: int = clamp_u8((num + den // 2) // den)
+        lut.append(mapped)
+        i = i + 1
+
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            px: Pixel = img.get_pixel(x, y)
+            old_l: int = px.luma_srgb()
+            new_l: int = lut[old_l]
+            if img.pixel_format() == PixelFormat.GRAY8 or old_l == 0:
+                out_mut.set_pixel(x, y, Pixel.rgba(new_l, new_l, new_l, px.a))
+            else:
+                out_mut.set_pixel(x, y, Pixel.rgba(clamp_u8(px.r * new_l // old_l), clamp_u8(px.g * new_l // old_l), clamp_u8(px.b * new_l // old_l), px.a))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def image_mse(a: Image, b: Image) -> float:
+    """Compute Mean Squared Error (MSE) across RGB channels of two equal-sized Images."""
+    if a.width() != b.width() or a.height() != b.height():
+        raise DimensionError("image_mse requires two Images of identical dimensions")
+    w: int = a.width()
+    h: int = a.height()
+    sum_sq: float = 0.0
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            pa: Pixel = a.get_pixel(x, y)
+            pb: Pixel = b.get_pixel(x, y)
+            dr: float = float(pa.r - pb.r)
+            dg: float = float(pa.g - pb.g)
+            db: float = float(pa.b - pb.b)
+            sum_sq = sum_sq + dr * dr + dg * dg + db * db
+            x = x + 1
+        y = y + 1
+    return sum_sq / float(w * h * 3)
+
+def image_mae(a: Image, b: Image) -> float:
+    """Compute Mean Absolute Error (MAE) across RGB channels of two equal-sized Images."""
+    if a.width() != b.width() or a.height() != b.height():
+        raise DimensionError("image_mae requires two Images of identical dimensions")
+    w: int = a.width()
+    h: int = a.height()
+    sum_abs: float = 0.0
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            pa: Pixel = a.get_pixel(x, y)
+            pb: Pixel = b.get_pixel(x, y)
+            sum_abs = sum_abs + float(abs(pa.r - pb.r)) + float(abs(pa.g - pb.g)) + float(abs(pa.b - pb.b))
+            x = x + 1
+        y = y + 1
+    return sum_abs / float(w * h * 3)
+
+def image_psnr(a: Image, b: Image) -> float:
+    """Compute Peak Signal-to-Noise Ratio (PSNR in dB); returns 100.0 for identical images."""
+    mse_val: float = image_mse(a, b)
+    if mse_val <= 1.0e-12:
+        return 100.0
+    max_sq: float = 255.0 * 255.0
+    return 10.0 * (nox.mathx.ln(max_sq / mse_val) / nox.mathx.ln(10.0))
+
+def image_ssim(a: Image, b: Image) -> float:
+    """Compute global Structural Similarity Index (SSIM) on perceptual luma in [-1.0, 1.0]."""
+    if a.width() != b.width() or a.height() != b.height():
+        raise DimensionError("image_ssim requires two Images of identical dimensions")
+    w: int = a.width()
+    h: int = a.height()
+    n: float = float(w * h)
+    sum_a: float = 0.0
+    sum_b: float = 0.0
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            sum_a = sum_a + float(a.get_pixel(x, y).luma_srgb())
+            sum_b = sum_b + float(b.get_pixel(x, y).luma_srgb())
+            x = x + 1
+        y = y + 1
+    mu_a: float = sum_a / n
+    mu_b: float = sum_b / n
+
+    var_a: float = 0.0
+    var_b: float = 0.0
+    cov_ab: float = 0.0
+    y = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            da: float = float(a.get_pixel(x, y).luma_srgb()) - mu_a
+            db: float = float(b.get_pixel(x, y).luma_srgb()) - mu_b
+            var_a = var_a + da * da
+            var_b = var_b + db * db
+            cov_ab = cov_ab + da * db
+            x = x + 1
+        y = y + 1
+    var_a = var_a / n
+    var_b = var_b / n
+    cov_ab = cov_ab / n
+
+    c1: float = 6.5025
+    c2: float = 58.5225
+    num: float = (2.0 * mu_a * mu_b + c1) * (2.0 * cov_ab + c2)
+    den: float = (mu_a * mu_a + mu_b * mu_b + c1) * (var_a + var_b + c2)
+    return num / den
+
+def average_hash(img: Image) -> int:
+    """Compute a 64-bit non-cryptographic perceptual average hash (aHash) from an 8x8 luma grid."""
+    small: Image = resize_image(img, 8, 8, ResampleFilter.AREA)
+    sum_luma: int = 0
+    y: int = 0
+    while y < 8:
+        x: int = 0
+        while x < 8:
+            sum_luma = sum_luma + small.get_pixel(x, y).luma_srgb()
+            x = x + 1
+        y = y + 1
+    avg_luma: int = sum_luma // 64
+    bits: int = 0
+    idx: int = 0
+    y = 0
+    while y < 8:
+        x: int = 0
+        while x < 8:
+            if small.get_pixel(x, y).luma_srgb() >= avg_luma:
+                if idx < 62:
+                    bits = bits | 1 << idx
+            idx = idx + 1
+            x = x + 1
+        y = y + 1
+    return bits
+
+def difference_hash(img: Image) -> int:
+    """Compute a 64-bit non-cryptographic perceptual difference hash (dHash) from a 9x8 horizontal gradient grid."""
+    small: Image = resize_image(img, 9, 8, ResampleFilter.AREA)
+    bits: int = 0
+    idx: int = 0
+    y: int = 0
+    while y < 8:
+        x: int = 0
+        while x < 8:
+            left_l: int = small.get_pixel(x, y).luma_srgb()
+            right_l: int = small.get_pixel(x + 1, y).luma_srgb()
+            if left_l > right_l and idx < 62:
+                bits = bits | 1 << idx
+            idx = idx + 1
+            x = x + 1
+        y = y + 1
+    return bits

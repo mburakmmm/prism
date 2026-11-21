@@ -1,0 +1,89 @@
+import nox.bytes
+import nox.fs
+import nox.path
+from nox.buffer import Buffer
+from nox.fs import FsError
+from nox.path import PathError
+from codecs.reader import decode_bytes, probe_bytes
+from codecs.sniff import ImageFormat, format_from_extension, format_from_name
+from codecs.writer import encode_to_format
+from core.errors import ImageIOError
+from core.image import Image
+from core.metadata import ImageInfo
+from core.options import DecodeOptions, EncodeOptions
+
+__all__: list[str] = ["probe_file", "open_image", "save_image", "save_image_as", "open_image_confined", "save_image_confined"]
+
+def _read_file_to_buffer(path: str, opt: DecodeOptions) -> Buffer:
+    if path == "":
+        raise ImageIOError("input file path cannot be empty")
+    raw_text: str = ""
+    try:
+        meta: nox.fs.FileMetadata = nox.fs.metadata(path)
+        opt.limits.validate_input_size(meta.size)
+        raw_text = nox.fs.read_to_string(path)
+    except FsError as err:
+        raise ImageIOError("failed to read image file '" + path + "': " + err.message)
+    return nox.bytes.from_str(raw_text)
+
+def _write_buffer_to_file(data: Buffer, path: str, opt: EncodeOptions) -> None:
+    if path == "":
+        raise ImageIOError("output file path cannot be empty")
+    if not opt.overwrite and nox.fs.exists(path):
+        raise ImageIOError("refusing to overwrite existing file without overwrite=True: " + path)
+    raw_text: str = nox.bytes.to_str(data)
+    try:
+        if opt.atomic_write:
+            nox.fs.write_string_atomic(path, raw_text)
+        else:
+            nox.fs.write_string(path, raw_text)
+    except FsError as err:
+        raise ImageIOError("failed to write image file '" + path + "': " + err.message)
+
+def probe_file(path: str, opt: DecodeOptions) -> ImageInfo:
+    """Read and probe an image file by magic bytes."""
+    buf: Buffer = _read_file_to_buffer(path, opt)
+    return probe_bytes(buf, opt)
+
+def open_image(path: str, opt: DecodeOptions) -> Image:
+    """Open and decode an image file by magic bytes (independent of file extension)."""
+    buf: Buffer = _read_file_to_buffer(path, opt)
+    return decode_bytes(buf, opt)
+
+def save_image_as(img: Image, path: str, format_name: str, opt: EncodeOptions) -> None:
+    """Encode an Image in an explicit format and write it to disk safely."""
+    if path == "":
+        raise ImageIOError("output file path cannot be empty")
+    if not opt.overwrite and nox.fs.exists(path):
+        raise ImageIOError("refusing to overwrite existing file without overwrite=True: " + path)
+    fmt: ImageFormat = format_from_name(format_name)
+    encoded: Buffer = encode_to_format(img, fmt, opt)
+    _write_buffer_to_file(encoded, path, opt)
+
+def save_image(img: Image, path: str, opt: EncodeOptions) -> None:
+    """Encode an Image using the format implied by path's extension and write it safely."""
+    if path == "":
+        raise ImageIOError("output file path cannot be empty")
+    if not opt.overwrite and nox.fs.exists(path):
+        raise ImageIOError("refusing to overwrite existing file without overwrite=True: " + path)
+    fmt: ImageFormat = format_from_extension(path)
+    encoded: Buffer = encode_to_format(img, fmt, opt)
+    _write_buffer_to_file(encoded, path, opt)
+
+def _confine_path(root_dir: str, rel_path: str) -> str:
+    if root_dir == "" or rel_path == "":
+        raise ImageIOError("root_dir and rel_path must be non-empty for confined file I/O")
+    try:
+        return nox.path.safe_join(root_dir, rel_path)
+    except PathError as err:
+        raise ImageIOError("path traversal blocked by safe_join: " + err.message)
+
+def open_image_confined(root_dir: str, rel_path: str, opt: DecodeOptions) -> Image:
+    """Open an image file confined within root_dir via nox.path.safe_join."""
+    full_path: str = _confine_path(root_dir, rel_path)
+    return open_image(full_path, opt)
+
+def save_image_confined(img: Image, root_dir: str, rel_path: str, opt: EncodeOptions) -> None:
+    """Save an image file confined within root_dir via nox.path.safe_join."""
+    full_path: str = _confine_path(root_dir, rel_path)
+    save_image(img, full_path, opt)

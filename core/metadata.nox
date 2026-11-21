@@ -1,0 +1,285 @@
+from nox.binary import BinaryWriter
+from nox.buffer import Buffer
+from core.errors import CorruptDataError, InvalidImageError, ResourceLimitError
+from core.limits import ResourceLimits, checked_add, checked_mul
+from core.pixel import AlphaMode, ColorSpace, PixelFormat
+
+__all__: list[str] = ["ExifSummary", "parse_exif_buffer", "build_minimal_exif_orientation", "sanitize_exif_buffer", "strip_private_metadata_from_image_meta", "ImageMetadata", "ImageInfo"]
+
+class ExifSummary:
+    """Parsed and security-validated EXIF summary extracted from a TIFF/EXIF buffer."""
+
+    orientation: int
+    has_gps_data: bool
+    has_private_tags: bool
+    ifd_count: int
+
+    def __init__(self, orientation: int, has_gps_data: bool, has_private_tags: bool, ifd_count: int) -> None:
+        self.orientation = orientation
+        self.has_gps_data = has_gps_data
+        self.has_private_tags = has_private_tags
+        self.ifd_count = ifd_count
+
+def _read_u16_end(data: Buffer, offset: int, little_endian: bool) -> int:
+    b0: int = int(data.get(offset))
+    b1: int = int(data.get(offset + 1))
+    if little_endian:
+        return b0 | b1 << 8
+    return b0 << 8 | b1
+
+def _read_u32_end(data: Buffer, offset: int, little_endian: bool) -> int:
+    b0: int = int(data.get(offset))
+    b1: int = int(data.get(offset + 1))
+    b2: int = int(data.get(offset + 2))
+    b3: int = int(data.get(offset + 3))
+    if little_endian:
+        return (b0 | b1 << 8 | b2 << 16 | b3 << 24) & 4294967295
+    return (b0 << 24 | b1 << 16 | b2 << 8 | b3) & 4294967295
+
+def _tiff_type_unit_bytes(field_type: int) -> int:
+    if field_type == 1 or field_type == 2 or field_type == 6 or field_type == 7:
+        return 1
+    if field_type == 3 or field_type == 8:
+        return 2
+    if field_type == 4 or field_type == 9 or field_type == 11:
+        return 4
+    if field_type == 5 or field_type == 10 or field_type == 12:
+        return 8
+    return 1
+
+def _is_private_exif_tag(tag: int) -> bool:
+    # 0x013B=Artist, 0x8825=GPSInfoIFDPointer, 0x927C=MakerNote, 0x9286=UserComment,
+    # 0xA430=CameraOwnerName, 0xA431=BodySerialNumber, 0xA434=LensModel, 0xA435=LensSerialNumber
+    return tag == 315 or tag == 34853 or tag == 37500 or tag == 37510 or tag == 42032 or tag == 42033 or tag == 42036 or tag == 42037
+
+def _contains_int(items: list[int], target: int) -> bool:
+    i: int = 0
+    while i < len(items):
+        if items[i] == target:
+            return True
+        i = i + 1
+    return False
+
+def parse_exif_buffer(exif_data: Buffer, lim: ResourceLimits) -> ExifSummary:
+    """Parse an EXIF/TIFF buffer with cyclic-IFD detection, depth bounds, and private tag inspection."""
+    total: int = exif_data.len()
+    lim.validate_metadata_size(total)
+    if total < 8:
+        raise CorruptDataError("EXIF buffer is too short (< 8 bytes)")
+
+    tiff_base: int = 0
+    if total >= 14 and int(exif_data.get(0)) == 69 and int(exif_data.get(1)) == 120 and int(exif_data.get(2)) == 105 and int(exif_data.get(3)) == 102 and int(exif_data.get(4)) == 0 and int(exif_data.get(5)) == 0:
+        tiff_base = 6
+
+    if tiff_base + 8 > total:
+        raise CorruptDataError("truncated TIFF header in EXIF payload")
+
+    b0: int = int(exif_data.get(tiff_base))
+    b1: int = int(exif_data.get(tiff_base + 1))
+    little_endian: bool = True
+    if b0 == 73 and b1 == 73:
+        little_endian = True
+    elif b0 == 77 and b1 == 77:
+        little_endian = False
+    else:
+        raise CorruptDataError("invalid TIFF byte-order mark in EXIF payload")
+
+    magic_42: int = _read_u16_end(exif_data, tiff_base + 2, little_endian)
+    if magic_42 != 42:
+        raise CorruptDataError("invalid TIFF magic 42 in EXIF payload")
+
+    first_ifd_rel: int = _read_u32_end(exif_data, tiff_base + 4, little_endian)
+    if first_ifd_rel < 8:
+        raise CorruptDataError("invalid initial IFD offset in EXIF payload")
+
+    queue: list[int] = [first_ifd_rel]
+    visited: list[int] = []
+    orientation: int = 1
+    has_gps: bool = False
+    has_private: bool = False
+
+    q_idx: int = 0
+    while q_idx < len(queue):
+        rel_off: int = queue[q_idx]
+        q_idx = q_idx + 1
+
+        if _contains_int(visited, rel_off):
+            raise CorruptDataError("cyclic IFD pointer detected in EXIF metadata")
+        if len(visited) >= lim.max_recursion_depth:
+            raise ResourceLimitError("EXIF IFD nesting/chain exceeds max_recursion_depth")
+        visited.append(rel_off)
+
+        abs_ifd: int = checked_add(tiff_base, rel_off)
+        if checked_add(abs_ifd, 2) > total:
+            raise CorruptDataError("EXIF IFD offset points outside metadata buffer")
+
+        num_entries: int = _read_u16_end(exif_data, abs_ifd, little_endian)
+        entries_bytes: int = checked_mul(num_entries, 12)
+        next_ptr_pos: int = checked_add(checked_add(abs_ifd, 2), entries_bytes)
+        if checked_add(next_ptr_pos, 4) > total:
+            raise CorruptDataError("truncated EXIF IFD directory entries")
+
+        e_idx: int = 0
+        while e_idx < num_entries:
+            ent_off: int = abs_ifd + 2 + e_idx * 12
+            tag: int = _read_u16_end(exif_data, ent_off, little_endian)
+            ftype: int = _read_u16_end(exif_data, ent_off + 2, little_endian)
+            fcount: int = _read_u32_end(exif_data, ent_off + 4, little_endian)
+            val_or_off: int = _read_u32_end(exif_data, ent_off + 8, little_endian)
+
+            unit_sz: int = _tiff_type_unit_bytes(ftype)
+            value_bytes: int = checked_mul(fcount, unit_sz)
+            if value_bytes > 4:
+                ext_abs: int = checked_add(tiff_base, val_or_off)
+                if checked_add(ext_abs, value_bytes) > total:
+                    raise CorruptDataError("EXIF tag external value offset exceeds buffer bounds")
+
+            if tag == 274:
+                # Orientation SHORT
+                if ftype != 3 or fcount != 1:
+                    raise CorruptDataError("invalid EXIF Orientation tag type or count")
+                orient_val: int = _read_u16_end(exif_data, ent_off + 8, little_endian)
+                if orient_val < 1 or orient_val > 8:
+                    raise CorruptDataError("invalid EXIF Orientation value: " + str(orient_val))
+                orientation = orient_val
+            elif tag == 34665:
+                # ExifSubIFD pointer
+                if val_or_off > 0:
+                    queue.append(val_or_off)
+            elif tag == 34853:
+                # GPSInfoIFDPointer
+                has_gps = True
+                has_private = True
+                if val_or_off > 0:
+                    queue.append(val_or_off)
+            elif _is_private_exif_tag(tag):
+                has_private = True
+
+            e_idx = e_idx + 1
+
+        next_ifd_rel: int = _read_u32_end(exif_data, next_ptr_pos, little_endian)
+        if next_ifd_rel != 0:
+            queue.append(next_ifd_rel)
+
+    return ExifSummary(orientation, has_gps, has_private, len(visited))
+
+def build_minimal_exif_orientation(orientation: int) -> Buffer:
+    """Build a minimal, clean 26-byte big-endian TIFF/EXIF buffer containing only the Orientation tag."""
+    if orientation < 1 or orientation > 8:
+        raise InvalidImageError("EXIF orientation must be in range [1, 8]")
+    buf: Buffer = Buffer(26)
+    w: BinaryWriter = BinaryWriter(buf)
+    # "MM\x00\x2a" big-endian TIFF header + IFD0 offset = 8
+    w.write_u8(u8(77))
+    w.write_u8(u8(77))
+    w.write_u16_be(u16(42))
+    w.write_u32_be(u32(8))
+    # IFD0: 1 entry
+    w.write_u16_be(u16(1))
+    # Tag 0x0112 (Orientation), Type 3 (SHORT), Count 1, Value (orientation << 16)
+    w.write_u16_be(u16(274))
+    w.write_u16_be(u16(3))
+    w.write_u32_be(u32(1))
+    w.write_u16_be(u16(orientation))
+    w.write_u16_be(u16(0))
+    # Next IFD offset = 0
+    w.write_u32_be(u32(0))
+    return buf
+
+def sanitize_exif_buffer(exif_data: Buffer, reset_orientation: bool, lim: ResourceLimits) -> Buffer:
+    """Validate exif_data and rewrite a sanitized EXIF block stripped of all GPS, serial, and MakerNote tags."""
+    summary: ExifSummary = parse_exif_buffer(exif_data, lim)
+    out_orient: int = summary.orientation
+    if reset_orientation:
+        out_orient = 1
+    return build_minimal_exif_orientation(out_orient)
+
+class ImageMetadata:
+    """Sanitized metadata attached to an Image."""
+
+    orientation: int
+    has_icc_profile: bool
+    icc_profile_size: int
+    icc_profile: Buffer
+    exif_stripped: bool
+    has_gps_data: bool
+    has_private_tags: bool
+    comment: str
+
+    def __init__(self, orientation: int, has_icc_profile: bool, icc_profile_size: int, exif_stripped: bool, comment: str) -> None:
+        if orientation < 1 or orientation > 8:
+            raise InvalidImageError("EXIF display orientation must be between 1 and 8")
+        if icc_profile_size < 0:
+            raise InvalidImageError("ICC profile size cannot be negative")
+        self.orientation = orientation
+        self.has_icc_profile = has_icc_profile
+        self.icc_profile_size = icc_profile_size
+        self.icc_profile = Buffer(0)
+        self.exif_stripped = exif_stripped
+        self.has_gps_data = False
+        self.has_private_tags = False
+        self.comment = comment
+
+    @staticmethod
+    def default() -> ImageMetadata:
+
+        return ImageMetadata(1, False, 0, True, "")
+
+    def set_icc_profile(self, profile_bytes: Buffer, lim: ResourceLimits) -> None:
+
+        lim.validate_metadata_size(profile_bytes.len())
+        copied: Buffer = Buffer(profile_bytes.len())
+        copied.copy_from(profile_bytes)
+        self.has_icc_profile = copied.len() > 0
+        self.icc_profile_size = copied.len()
+        self.icc_profile = copied
+
+    def clone(self) -> ImageMetadata:
+
+        cloned: ImageMetadata = ImageMetadata(self.orientation, self.has_icc_profile, self.icc_profile_size, self.exif_stripped, self.comment)
+        if self.icc_profile.len() > 0:
+            cbuf: Buffer = Buffer(self.icc_profile.len())
+            cbuf.copy_from(self.icc_profile)
+            cloned.icc_profile = cbuf
+        cloned.has_gps_data = self.has_gps_data
+        cloned.has_private_tags = self.has_private_tags
+        return cloned
+
+def strip_private_metadata_from_image_meta(meta: ImageMetadata) -> ImageMetadata:
+    """Return a copy of ImageMetadata with GPS, camera serial, MakerNote, and comments scrubbed."""
+    cleaned: ImageMetadata = meta.clone()
+    cleaned.exif_stripped = True
+    cleaned.has_gps_data = False
+    cleaned.has_private_tags = False
+    cleaned.comment = ""
+    return cleaned
+
+class ImageInfo:
+    """Lightweight image header and pixel layout summary."""
+
+    width: int
+    height: int
+    pixel_format: PixelFormat
+    color_space: ColorSpace
+    alpha_mode: AlphaMode
+    frame_count: int
+    format_name: str
+    metadata: ImageMetadata
+
+    def __init__(self, width: int, height: int, pixel_format: PixelFormat, color_space: ColorSpace, alpha_mode: AlphaMode, frame_count: int, format_name: str, metadata: ImageMetadata) -> None:
+        self.width = width
+        self.height = height
+        self.pixel_format = pixel_format
+        self.color_space = color_space
+        self.alpha_mode = alpha_mode
+        self.frame_count = frame_count
+        self.format_name = format_name
+        self.metadata = metadata
+
+    def channels(self) -> int:
+
+        return self.pixel_format.channels()
+
+    def bytes_per_pixel(self) -> int:
+
+        return self.pixel_format.bytes_per_pixel()

@@ -1,0 +1,109 @@
+import nox.fs
+import nox.os
+import nox.path
+from nox.buffer import Buffer
+from adapters.file import open_image, probe_file, save_image
+from codecs.pgm import open_pgm, save_pgm
+from codecs.ppm import decode_ppm, encode_ppm, open_ppm, save_ppm
+from core.image import Image, MutableImage
+from core.limits import ResourceLimits
+from core.metadata import ImageInfo
+from core.options import DecodeOptions, EncodeOptions
+from core.pixel import Pixel, PixelFormat
+
+lim: ResourceLimits = ResourceLimits.default()
+canvas: MutableImage = MutableImage.create(64, 64, PixelFormat.RGBA8, Pixel.rgba(255, 255, 255, 255), lim)
+
+dark: Pixel = Pixel.rgba(30, 41, 59, 255)
+light: Pixel = Pixel.rgba(241, 245, 249, 255)
+accent: Pixel = Pixel.rgba(14, 165, 233, 255)
+
+tile_size: int = 8
+y: int = 0
+while y < 64:
+    x: int = 0
+    while x < 64:
+        tx: int = x // tile_size
+        ty: int = y // tile_size
+        if (tx + ty) % 2 == 0:
+            if tx == ty:
+                canvas.set_pixel(x, y, accent)
+            else:
+                canvas.set_pixel(x, y, dark)
+        else:
+            canvas.set_pixel(x, y, light)
+        x = x + 1
+    y = y + 1
+
+checker_img: Image = canvas.to_image()
+encoded_ppm: Buffer = encode_ppm(checker_img, EncodeOptions.default())
+roundtrip_img: Image = decode_ppm(encoded_ppm, DecodeOptions.default())
+
+assert roundtrip_img.width() == 64, "checkerboard width mismatch"
+assert roundtrip_img.height() == 64, "checkerboard height mismatch"
+assert roundtrip_img.get_pixel(0, 0).equals(accent), "top-left accent tile mismatch"
+assert roundtrip_img.get_pixel(8, 0).equals(light), "second tile light mismatch"
+assert roundtrip_img.get_pixel(16, 0).equals(dark), "third tile dark mismatch"
+
+fix_dir: str = nox.path.join(nox.os.current_dir(), "tests/fixtures")
+nox.fs.create_dir_all(fix_dir)
+fix_ppm_path: str = nox.path.join(fix_dir, "checkerboard_4x4.ppm")
+fix_pgm_path: str = nox.path.join(fix_dir, "gradient_4x4.pgm")
+fix_bmp_path: str = nox.path.join(fix_dir, "checkerboard_4x4.bmp")
+fix_bmp32_path: str = nox.path.join(fix_dir, "rgba_4x4.bmp")
+
+fix_mut: MutableImage = MutableImage.create(4, 4, PixelFormat.RGB8, Pixel.black(), lim)
+fy: int = 0
+while fy < 4:
+    fx: int = 0
+    while fx < 4:
+        if (fx + fy) % 2 == 0:
+            fix_mut.set_pixel(fx, fy, Pixel.rgb(255, 255, 255))
+        else:
+            fix_mut.set_pixel(fx, fy, Pixel.rgb(0, 0, 0))
+        fx = fx + 1
+    fy = fy + 1
+fix_img: Image = fix_mut.to_image()
+save_ppm(fix_img, fix_ppm_path, EncodeOptions.overwrite_atomic())
+loaded_fix_ppm: Image = open_ppm(fix_ppm_path, DecodeOptions.default())
+assert loaded_fix_ppm.pixel_equals(fix_img), "4x4 PPM fixture mismatch"
+
+save_image(fix_img, fix_bmp_path, EncodeOptions.overwrite_atomic())
+loaded_fix_bmp: Image = open_image(fix_bmp_path, DecodeOptions.default())
+assert loaded_fix_bmp.pixel_equals(fix_img), "4x4 BMP 24-bit fixture mismatch"
+
+rgba_mut: MutableImage = MutableImage.create(4, 4, PixelFormat.RGBA8, Pixel.transparent(), lim)
+ry: int = 0
+while ry < 4:
+    rx: int = 0
+    while rx < 4:
+        rgba_mut.set_pixel(rx, ry, Pixel.rgba(rx * 64, ry * 64, (rx + ry) * 32, (rx * 4 + ry) * 17))
+        rx = rx + 1
+    ry = ry + 1
+rgba_img: Image = rgba_mut.to_image()
+save_image(rgba_img, fix_bmp32_path, EncodeOptions.overwrite_atomic())
+bmp32_info: ImageInfo = probe_file(fix_bmp32_path, DecodeOptions.default())
+assert bmp32_info.format_name == "BMP" and bmp32_info.channels() == 4, "4x4 BMP32 probe mismatch"
+loaded_bmp32: Image = open_image(fix_bmp32_path, DecodeOptions.default())
+assert loaded_bmp32.pixel_equals(rgba_img), "4x4 BMP 32-bit fixture mismatch"
+
+grad_mut: MutableImage = MutableImage.create(4, 4, PixelFormat.GRAY8, Pixel.black(), lim)
+gy: int = 0
+while gy < 4:
+    gx: int = 0
+    while gx < 4:
+        grad_mut.set_pixel(gx, gy, Pixel.gray((gy * 4 + gx) * 17))
+        gx = gx + 1
+    gy = gy + 1
+grad_img: Image = grad_mut.to_image()
+save_pgm(grad_img, fix_pgm_path, EncodeOptions.overwrite_atomic())
+loaded_fix_pgm: Image = open_pgm(fix_pgm_path, DecodeOptions.default())
+assert loaded_fix_pgm.pixel_equals(grad_img), "4x4 PGM fixture mismatch"
+
+out_path: str = nox.path.join(nox.os.current_dir(), "examples/checkerboard_demo.ppm")
+save_ppm(checker_img, out_path, EncodeOptions.overwrite_atomic())
+disk_img: Image = open_ppm(out_path, DecodeOptions.default())
+assert disk_img.pixel_equals(roundtrip_img), "disk round-trip pixel mismatch"
+nox.fs.remove_file(out_path)
+
+print("checkerboard-ppm-ok", roundtrip_img.width(), roundtrip_img.height(), encoded_ppm.len())

@@ -1,0 +1,226 @@
+import nox.test
+from prism import AffineMatrix2D, BorderMode, CropBoundsPolicy, DimensionError, Image, InvalidImageError, MutableImage, Pixel, PixelFormat, ResampleFilter, ResizeFit, ResizeOptions, ResourceLimitError, ResourceLimits, affine_transform, apply_exif_orientation, crop_image, crop_with_policy, flip_horizontal, flip_vertical, new_image, new_image_with_format, normalize_orientation, pad_image, pad_with_mode, resize_image, resize_with_options, rotate90, rotate180, rotate270, rotate_arbitrary, thumbnail, transpose, transverse
+
+def _make_asymmetric_pattern(w: int, h: int) -> Image:
+    mut_img: MutableImage = MutableImage.create(w, h, PixelFormat.RGBA8, Pixel.transparent(), ResourceLimits.default())
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            mut_img.set_pixel(x, y, Pixel.rgba(x * 41 + y * 7 + 13 & 255, x * 19 + y * 53 + 29 & 255, x * 83 + y * 31 + 71 & 255, (x + y * 3) * 23 + 127 & 255))
+            x = x + 1
+        y = y + 1
+    return mut_img.to_image()
+
+def test_metamorphic_flip_rotate_transpose() -> None:
+    shapes_w: list[int] = [1, 1, 5, 3, 4, 7]
+    shapes_h: list[int] = [1, 5, 1, 5, 4, 3]
+    idx: int = 0
+    while idx < len(shapes_w):
+        w: int = shapes_w[idx]
+        h: int = shapes_h[idx]
+        src: Image = _make_asymmetric_pattern(w, h)
+
+        fh2: Image = flip_horizontal(flip_horizontal(src))
+        nox.test.assert_true(fh2.pixel_equals(src), "flip_h(flip_h(img)) == img")
+
+        fv2: Image = flip_vertical(flip_vertical(src))
+        nox.test.assert_true(fv2.pixel_equals(src), "flip_v(flip_v(img)) == img")
+
+        tr2: Image = transpose(transpose(src))
+        nox.test.assert_true(tr2.pixel_equals(src), "transpose(transpose(img)) == img")
+
+        tv2: Image = transverse(transverse(src))
+        nox.test.assert_true(tv2.pixel_equals(src), "transverse(transverse(img)) == img")
+
+        r90_4: Image = rotate90(rotate90(rotate90(rotate90(src))))
+        nox.test.assert_true(r90_4.pixel_equals(src), "rotate90 x 4 == img")
+
+        r180_2: Image = rotate180(rotate180(src))
+        nox.test.assert_true(r180_2.pixel_equals(src), "rotate180 x 2 == img")
+
+        r270_90: Image = rotate270(rotate90(src))
+        nox.test.assert_true(r270_90.pixel_equals(src), "rotate270(rotate90(img)) == img")
+
+        r90_twice: Image = rotate90(rotate90(src))
+        r180_once: Image = rotate180(src)
+        nox.test.assert_true(r90_twice.pixel_equals(r180_once), "rotate90 x 2 == rotate180")
+
+        near_id: Image = resize_image(src, w, h, ResampleFilter.NEAREST)
+        nox.test.assert_true(near_id.pixel_equals(src), "resize(img, w, h, NEAREST) == img")
+
+        idx = idx + 1
+
+def test_crop_policies_and_border_padding() -> None:
+    src: Image = _make_asymmetric_pattern(6, 5)
+    sub: Image = crop_image(src, 1, 2, 3, 2)
+    nox.test.assert_eq_int(sub.width(), 3, "strict crop width")
+    nox.test.assert_eq_int(sub.height(), 2, "strict crop height")
+    cy: int = 0
+    while cy < 2:
+        cx: int = 0
+        while cx < 3:
+            nox.test.assert_true(sub.get_pixel(cx, cy).equals(src.get_pixel(1 + cx, 2 + cy)), "strict crop exact pixel match")
+            cx = cx + 1
+        cy = cy + 1
+
+    # CLIP policy on out-of-bounds rectangle (-2, -1, 5, 4) -> clipped to (0, 0, 3, 3)
+    clipped: Image = crop_with_policy(src, -2, -1, 5, 4, CropBoundsPolicy.CLIP, Pixel.transparent())
+    nox.test.assert_eq_int(clipped.width(), 3, "clipped crop width")
+    nox.test.assert_eq_int(clipped.height(), 3, "clipped crop height")
+    nox.test.assert_true(clipped.get_pixel(0, 0).equals(src.get_pixel(0, 0)), "clipped crop origin pixel")
+
+    # PAD policy on out-of-bounds rectangle (-1, -1, 3, 3)
+    pad_color: Pixel = Pixel.rgba(9, 8, 7, 255)
+    padded_crop: Image = crop_with_policy(src, -1, -1, 3, 3, CropBoundsPolicy.PAD, pad_color)
+    nox.test.assert_eq_int(padded_crop.width(), 3, "padded crop width")
+    nox.test.assert_true(padded_crop.get_pixel(0, 0).equals(pad_color), "padded crop exterior pixel")
+    nox.test.assert_true(padded_crop.get_pixel(1, 1).equals(src.get_pixel(0, 0)), "padded crop interior pixel")
+
+    # Border padding modes: CONSTANT, CLAMP, MIRROR, WRAP
+    p_const: Image = pad_image(src, 2, 1, 2, 1, pad_color)
+    nox.test.assert_eq_int(p_const.width(), 10, "pad_image width")
+    nox.test.assert_eq_int(p_const.height(), 7, "pad_image height")
+    nox.test.assert_true(p_const.get_pixel(0, 0).equals(pad_color), "pad_image border pixel")
+    nox.test.assert_true(p_const.get_pixel(2, 1).equals(src.get_pixel(0, 0)), "pad_image interior pixel")
+
+    p_clamp: Image = pad_with_mode(src, 1, 1, 1, 1, BorderMode.CLAMP, pad_color)
+    nox.test.assert_true(p_clamp.get_pixel(0, 0).equals(src.get_pixel(0, 0)), "CLAMP top-left corner matches src(0,0)")
+
+    p_mirror: Image = pad_with_mode(src, 1, 1, 1, 1, BorderMode.MIRROR, pad_color)
+    nox.test.assert_true(p_mirror.get_pixel(0, 1).equals(src.get_pixel(1, 0)), "MIRROR left border reflects src(1,0)")
+
+    p_wrap: Image = pad_with_mode(src, 1, 1, 1, 1, BorderMode.WRAP, pad_color)
+    nox.test.assert_true(p_wrap.get_pixel(0, 1).equals(src.get_pixel(5, 0)), "WRAP left border wraps to src(w-1,0)")
+
+def test_exif_orientations_1_to_8() -> None:
+    # 2x3 image to verify width/height swap on orientations 5, 6, 7, 8
+    src: Image = _make_asymmetric_pattern(2, 3)
+
+    o1: Image = apply_exif_orientation(src, 1)
+    nox.test.assert_true(o1.pixel_equals(src), "EXIF orientation 1 identity")
+    nox.test.assert_eq_int(o1.metadata.orientation, 1, "EXIF orientation reset to 1")
+
+    o2: Image = apply_exif_orientation(src, 2)
+    nox.test.assert_true(o2.pixel_equals(flip_horizontal(src)), "EXIF orientation 2 flip_h")
+
+    o3: Image = apply_exif_orientation(src, 3)
+    nox.test.assert_true(o3.pixel_equals(rotate180(src)), "EXIF orientation 3 rotate180")
+
+    o4: Image = apply_exif_orientation(src, 4)
+    nox.test.assert_true(o4.pixel_equals(flip_vertical(src)), "EXIF orientation 4 flip_v")
+
+    o5: Image = apply_exif_orientation(src, 5)
+    nox.test.assert_eq_int(o5.width(), 3, "EXIF orientation 5 swaps width/height")
+    nox.test.assert_true(o5.pixel_equals(transpose(src)), "EXIF orientation 5 transpose")
+
+    o6: Image = apply_exif_orientation(src, 6)
+    nox.test.assert_eq_int(o6.width(), 3, "EXIF orientation 6 swaps width/height")
+    nox.test.assert_true(o6.pixel_equals(rotate90(src)), "EXIF orientation 6 rotate90")
+
+    o7: Image = apply_exif_orientation(src, 7)
+    nox.test.assert_eq_int(o7.width(), 3, "EXIF orientation 7 swaps width/height")
+    nox.test.assert_true(o7.pixel_equals(transverse(src)), "EXIF orientation 7 transverse")
+
+    o8: Image = apply_exif_orientation(src, 8)
+    nox.test.assert_eq_int(o8.width(), 3, "EXIF orientation 8 swaps width/height")
+    nox.test.assert_true(o8.pixel_equals(rotate270(src)), "EXIF orientation 8 rotate270")
+
+    # Verify normalize_orientation does not double-rotate when called twice
+    tagged: Image = src.clone()
+    tagged.metadata.orientation = 6
+    norm_once: Image = normalize_orientation(tagged)
+    nox.test.assert_eq_int(norm_once.metadata.orientation, 1, "normalize_orientation resets tag to 1")
+    norm_twice: Image = normalize_orientation(norm_once)
+    nox.test.assert_true(norm_twice.pixel_equals(norm_once), "second normalize_orientation is no-op")
+
+def test_arbitrary_rotate_and_affine() -> None:
+    src: Image = _make_asymmetric_pattern(6, 6)
+
+    # Fast paths via rotate_arbitrary
+    nox.test.assert_true(rotate_arbitrary(src, 90.0, True, Pixel.transparent(), ResampleFilter.BILINEAR).pixel_equals(rotate90(src)), "rotate_arbitrary(90.0) matches rotate90")
+    nox.test.assert_true(rotate_arbitrary(src, -90.0, True, Pixel.transparent(), ResampleFilter.BILINEAR).pixel_equals(rotate270(src)), "rotate_arbitrary(-90.0) matches rotate270")
+
+    # 45 degree expanded rotation with transparent border
+    rot45: Image = rotate_arbitrary(src, 45.0, True, Pixel.transparent(), ResampleFilter.BILINEAR)
+    nox.test.assert_true(rot45.width() > 6 and rot45.height() > 6, "45 deg expand increases bounds")
+    nox.test.assert_eq_int(rot45.get_pixel(0, 0).a, 0, "45 deg corner is transparent background")
+
+    # Affine identity and integer translation
+    id_img: Image = affine_transform(src, AffineMatrix2D.identity(), 6, 6, Pixel.transparent(), ResampleFilter.NEAREST)
+    nox.test.assert_true(id_img.pixel_equals(src), "affine identity == src")
+
+    trans_img: Image = affine_transform(src, AffineMatrix2D.translation(2.0, 1.0), 8, 7, Pixel.transparent(), ResampleFilter.NEAREST)
+    nox.test.assert_eq_int(trans_img.get_pixel(0, 0).a, 0, "translated exterior pixel is transparent")
+    nox.test.assert_true(trans_img.get_pixel(2, 1).equals(src.get_pixel(0, 0)), "translated origin pixel at (2, 1)")
+
+def test_geometry_negative_and_nan_inf_inputs() -> None:
+    src: Image = new_image(4, 4, Pixel.white())
+    nan_val: float = 0.0 / 0.0
+    inf_val: float = 1.0 / 0.0
+
+    # 1. NaN angle in rotate_arbitrary
+    c_nan: bool = False
+    try:
+        rotate_arbitrary(src, nan_val, False, Pixel.transparent(), ResampleFilter.BILINEAR)
+    except DimensionError:
+        c_nan = True
+    nox.test.assert_true(c_nan, "NaN angle rejected in rotate_arbitrary")
+
+    # 2. Inf angle in rotate_arbitrary
+    c_inf: bool = False
+    try:
+        rotate_arbitrary(src, inf_val, False, Pixel.transparent(), ResampleFilter.BILINEAR)
+    except DimensionError:
+        c_inf = True
+    nox.test.assert_true(c_inf, "Inf angle rejected in rotate_arbitrary")
+
+    # 3. Singular affine matrix
+    c_sing: bool = False
+    try:
+        bad_mat: AffineMatrix2D = AffineMatrix2D(1.0, 2.0, 0.0, 2.0, 4.0, 0.0)
+        affine_transform(src, bad_mat, 4, 4, Pixel.transparent(), ResampleFilter.BILINEAR)
+    except DimensionError:
+        c_sing = True
+    nox.test.assert_true(c_sing, "singular affine matrix rejected")
+
+    # 4. Negative pad margin
+    c_pad: bool = False
+    try:
+        pad_image(src, -1, 0, 0, 0, Pixel.black())
+    except DimensionError:
+        c_pad = True
+    nox.test.assert_true(c_pad, "negative pad margin rejected")
+
+    # 5. Resize target 0 or negative
+    c_res0: bool = False
+    try:
+        resize_image(src, 0, 4, ResampleFilter.BILINEAR)
+    except DimensionError:
+        c_res0 = True
+    nox.test.assert_true(c_res0, "resize width 0 rejected")
+
+    # 6. Resize exceeding memory budget
+    small_lim: ResourceLimits = ResourceLimits(100, 100, 10000, 4096, 4096, 4, 1024, 4096, 8, 4096, 0, 1000)
+    bounded_src: Image = new_image_with_format(4, 4, PixelFormat.RGBA8, Pixel.white(), small_lim)
+    c_budget: bool = False
+    try:
+        resize_image(bounded_src, 64, 64, ResampleFilter.BILINEAR)
+    except ResourceLimitError:
+        c_budget = True
+    nox.test.assert_true(c_budget, "oversized resize rejected by ResourceLimits")
+
+    # 7. Invalid EXIF orientation 0 or 9
+    c_exif: bool = False
+    try:
+        apply_exif_orientation(src, 9)
+    except InvalidImageError:
+        c_exif = True
+    nox.test.assert_true(c_exif, "EXIF orientation 9 rejected")
+
+test_metamorphic_flip_rotate_transpose()
+test_crop_policies_and_border_padding()
+test_exif_orientations_1_to_8()
+test_arbitrary_rotate_and_affine()
+test_geometry_negative_and_nan_inf_inputs()
+print("geometry_test-ok")

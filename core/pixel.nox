@@ -1,0 +1,204 @@
+from core.errors import InvalidImageError, UnsupportedPixelFormatError
+
+__all__: list[str] = ["PixelFormat", "ColorSpace", "AlphaMode", "Pixel"]
+
+enum PixelFormat:
+    GRAY8
+    RGB8
+    RGBA8
+    GRAY16
+    RGB16
+    RGBA16
+    RGBAF32
+    INDEXED8
+
+    def channels(self) -> int:
+        match self:
+            case PixelFormat.GRAY8:
+                return 1
+            case PixelFormat.RGB8:
+                return 3
+            case PixelFormat.RGBA8:
+                return 4
+            case PixelFormat.GRAY16:
+                return 1
+            case PixelFormat.RGB16:
+                return 3
+            case PixelFormat.RGBA16:
+                return 4
+            case PixelFormat.RGBAF32:
+                return 4
+            case PixelFormat.INDEXED8:
+                return 1
+
+    def bytes_per_pixel(self) -> int:
+
+        match self:
+            case PixelFormat.GRAY8:
+                return 1
+            case PixelFormat.RGB8:
+                return 3
+            case PixelFormat.RGBA8:
+                return 4
+            case PixelFormat.GRAY16:
+                return 2
+            case PixelFormat.RGB16:
+                return 6
+            case PixelFormat.RGBA16:
+                return 8
+            case PixelFormat.RGBAF32:
+                return 16
+            case PixelFormat.INDEXED8:
+                return 1
+
+    def is_supported_core(self) -> bool:
+
+        match self:
+            case PixelFormat.GRAY8:
+                return True
+            case PixelFormat.RGB8:
+                return True
+            case PixelFormat.RGBA8:
+                return True
+            case _:
+                return False
+
+    def has_alpha(self) -> bool:
+
+        match self:
+            case PixelFormat.RGBA8:
+                return True
+            case PixelFormat.RGBA16:
+                return True
+            case PixelFormat.RGBAF32:
+                return True
+            case _:
+                return False
+
+    def name(self) -> str:
+
+        match self:
+            case PixelFormat.GRAY8:
+                return "GRAY8"
+            case PixelFormat.RGB8:
+                return "RGB8"
+            case PixelFormat.RGBA8:
+                return "RGBA8"
+            case PixelFormat.GRAY16:
+                return "GRAY16"
+            case PixelFormat.RGB16:
+                return "RGB16"
+            case PixelFormat.RGBA16:
+                return "RGBA16"
+            case PixelFormat.RGBAF32:
+                return "RGBAF32"
+            case PixelFormat.INDEXED8:
+                return "INDEXED8"
+
+    def require_core_supported(self) -> None:
+
+        if not self.is_supported_core():
+            raise UnsupportedPixelFormatError("pixel format " + self.name() + " is not supported in 8-bit core operations")
+
+enum ColorSpace:
+    SRGB
+    LINEAR_SRGB
+    DISPLAY_P3
+    UNKNOWN
+    ICC_PROFILE
+
+    def name(self) -> str:
+        match self:
+            case ColorSpace.SRGB:
+                return "sRGB"
+            case ColorSpace.LINEAR_SRGB:
+                return "LinearSRGB"
+            case ColorSpace.DISPLAY_P3:
+                return "DisplayP3"
+            case ColorSpace.UNKNOWN:
+                return "Unknown"
+            case ColorSpace.ICC_PROFILE:
+                return "ICCProfile"
+
+enum AlphaMode:
+    OPAQUE
+    STRAIGHT
+    PREMULTIPLIED
+
+    def name(self) -> str:
+        match self:
+            case AlphaMode.OPAQUE:
+                return "Opaque"
+            case AlphaMode.STRAIGHT:
+                return "Straight"
+            case AlphaMode.PREMULTIPLIED:
+                return "Premultiplied"
+
+def _validate_channel_u8(val: int, label: str) -> int:
+    if val < 0 or val > 255:
+        raise InvalidImageError("pixel channel " + label + " out of 8-bit range [0, 255]: " + str(val))
+    return val
+
+class Pixel:
+    """8-bit RGBA pixel value. For GRAY8, r==g==b and a==255; for RGB8, a==255."""
+
+    r: int
+    g: int
+    b: int
+    a: int
+
+    def __init__(self, r: int, g: int, b: int, a: int) -> None:
+        self.r = _validate_channel_u8(r, "r")
+        self.g = _validate_channel_u8(g, "g")
+        self.b = _validate_channel_u8(b, "b")
+        self.a = _validate_channel_u8(a, "a")
+
+    @staticmethod
+    def rgba(r: int, g: int, b: int, a: int) -> Pixel:
+
+        return Pixel(r, g, b, a)
+
+    @staticmethod
+    def rgb(r: int, g: int, b: int) -> Pixel:
+
+        return Pixel(r, g, b, 255)
+
+    @staticmethod
+    def gray(v: int) -> Pixel:
+
+        c: int = _validate_channel_u8(v, "gray")
+        return Pixel(c, c, c, 255)
+
+    @staticmethod
+    def transparent() -> Pixel:
+
+        return Pixel(0, 0, 0, 0)
+
+    @staticmethod
+    def black() -> Pixel:
+
+        return Pixel(0, 0, 0, 255)
+
+    @staticmethod
+    def white() -> Pixel:
+
+        return Pixel(255, 255, 255, 255)
+
+    def luma_srgb(self) -> int:
+
+        """BT.709 integer perceptual luma approximation in [0, 255]."""
+        weighted: int = self.r * 2126 + self.g * 7152 + self.b * 722 + 5000
+        res: int = weighted // 10000
+        if res < 0:
+            return 0
+        if res > 255:
+            return 255
+        return res
+
+    def equals(self, other: Pixel) -> bool:
+
+        return self.r == other.r and self.g == other.g and self.b == other.b and self.a == other.a
+
+    def to_str(self) -> str:
+
+        return "Pixel(" + str(self.r) + ", " + str(self.g) + ", " + str(self.b) + ", " + str(self.a) + ")"

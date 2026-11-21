@@ -1,0 +1,198 @@
+import nox.mathx
+from core.errors import DimensionError
+from core.image import Image, MutableImage
+from core.pixel import Pixel
+from transforms.border import pad_image
+from transforms.crop import crop_image
+from transforms.resample import ResampleFilter, sample_area_box, sample_image_at
+
+__all__: list[str] = ["ResizeFit", "ResizeOptions", "resize_exact", "resize_image", "resize_with_options", "thumbnail"]
+
+enum ResizeFit:
+    FILL
+    CONTAIN
+    COVER
+    INSIDE
+    OUTSIDE
+
+    def name(self) -> str:
+        match self:
+            case ResizeFit.FILL:
+                return "FILL"
+            case ResizeFit.CONTAIN:
+                return "CONTAIN"
+            case ResizeFit.COVER:
+                return "COVER"
+            case ResizeFit.INSIDE:
+                return "INSIDE"
+            case ResizeFit.OUTSIDE:
+                return "OUTSIDE"
+
+class ResizeOptions:
+    """Typed configuration for image resizing and aspect-ratio fitting."""
+
+    filter: ResampleFilter
+    fit: ResizeFit
+    background: Pixel
+    alpha_safe: bool
+    linear_light: bool
+
+    def __init__(self, filter: ResampleFilter, fit: ResizeFit, background: Pixel, alpha_safe: bool, linear_light: bool) -> None:
+        self.filter = filter
+        self.fit = fit
+        self.background = background
+        self.alpha_safe = alpha_safe
+        self.linear_light = linear_light
+
+    @staticmethod
+    def default() -> ResizeOptions:
+
+        return ResizeOptions(ResampleFilter.BILINEAR, ResizeFit.FILL, Pixel.transparent(), True, False)
+
+    @staticmethod
+    def high_quality() -> ResizeOptions:
+
+        """Gamma-aware (linear light) + premultiplied alpha Lanczos3 resampling."""
+        return ResizeOptions(ResampleFilter.LANCZOS3, ResizeFit.FILL, Pixel.transparent(), True, True)
+
+    @staticmethod
+    def fast_srgb(filter: ResampleFilter) -> ResizeOptions:
+
+        """Legacy perceptual sRGB resampling without premultiplied alpha weighting."""
+        return ResizeOptions(filter, ResizeFit.FILL, Pixel.transparent(), False, False)
+
+    @staticmethod
+    def fit_contain(filter: ResampleFilter, bg_px: Pixel) -> ResizeOptions:
+
+        return ResizeOptions(filter, ResizeFit.CONTAIN, bg_px, True, False)
+
+    @staticmethod
+    def fit_cover(filter: ResampleFilter) -> ResizeOptions:
+
+        return ResizeOptions(filter, ResizeFit.COVER, Pixel.transparent(), True, False)
+
+    @staticmethod
+    def fit_inside(filter: ResampleFilter) -> ResizeOptions:
+
+        return ResizeOptions(filter, ResizeFit.INSIDE, Pixel.transparent(), True, False)
+
+    @staticmethod
+    def fit_outside(filter: ResampleFilter) -> ResizeOptions:
+
+        return ResizeOptions(filter, ResizeFit.OUTSIDE, Pixel.transparent(), True, False)
+
+def resize_exact(img: Image, out_w: int, out_h: int, filter: ResampleFilter, alpha_safe: bool, linear_light: bool) -> Image:
+    """Resize img directly to out_w x out_h using the x+0.5, y+0.5 pixel-center convention."""
+    if out_w <= 0 or out_h <= 0:
+        raise DimensionError("resize target width and height must be positive")
+    in_w: int = img.width()
+    in_h: int = img.height()
+    img.limits.validate_dimensions(out_w, out_h, img.bytes_per_pixel())
+
+    if in_w == out_w and in_h == out_h and filter == ResampleFilter.NEAREST:
+        return img.clone()
+
+    out_mut: MutableImage = MutableImage.create(out_w, out_h, img.pixel_format(), Pixel.transparent(), img.limits)
+    scale_x: float = float(in_w) / float(out_w)
+    scale_y: float = float(in_h) / float(out_h)
+    half_box_w: float = nox.mathx.max(0.5, 0.5 * scale_x)
+    half_box_h: float = nox.mathx.max(0.5, 0.5 * scale_y)
+
+    dy: int = 0
+    while dy < out_h:
+        center_y: float = (float(dy) + 0.5) * scale_y
+        sy: float = center_y - 0.5
+        box_y0: float = center_y - half_box_h
+        box_y1: float = center_y + half_box_h
+        dx: int = 0
+        while dx < out_w:
+            px: Pixel = Pixel.transparent()
+            if filter == ResampleFilter.AREA:
+                center_x: float = (float(dx) + 0.5) * scale_x
+                box_x0: float = center_x - half_box_w
+                box_x1: float = center_x + half_box_w
+                px = sample_area_box(img, box_x0, box_y0, box_x1, box_y1, alpha_safe, linear_light)
+            else:
+                sx: float = (float(dx) + 0.5) * scale_x - 0.5
+                px = sample_image_at(img, sx, sy, filter, alpha_safe, linear_light)
+            out_mut.set_pixel(dx, dy, px)
+            dx = dx + 1
+        dy = dy + 1
+
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def _clamp_min_1(v: int) -> int:
+    if v < 1:
+        return 1
+    return v
+
+def resize_with_options(img: Image, target_w: int, target_h: int, opt: ResizeOptions) -> Image:
+    """Resize img according to target dimensions and ResizeFit policy."""
+    if target_w <= 0 or target_h <= 0:
+        raise DimensionError("resize target width and height must be positive")
+    in_w: int = img.width()
+    in_h: int = img.height()
+    img.limits.validate_dimensions(target_w, target_h, img.bytes_per_pixel())
+
+    match opt.fit:
+        case ResizeFit.FILL:
+            return resize_exact(img, target_w, target_h, opt.filter, opt.alpha_safe, opt.linear_light)
+        case ResizeFit.INSIDE:
+            ratio_x: float = float(target_w) / float(in_w)
+            ratio_y: float = float(target_h) / float(in_h)
+            scale: float = nox.mathx.min(ratio_x, ratio_y)
+            scaled_w: int = _clamp_min_1(int(float(in_w) * scale + 0.5))
+            scaled_h: int = _clamp_min_1(int(float(in_h) * scale + 0.5))
+            if scaled_w > target_w:
+                scaled_w = target_w
+            if scaled_h > target_h:
+                scaled_h = target_h
+            return resize_exact(img, scaled_w, scaled_h, opt.filter, opt.alpha_safe, opt.linear_light)
+        case ResizeFit.OUTSIDE:
+            ratio_x2: float = float(target_w) / float(in_w)
+            ratio_y2: float = float(target_h) / float(in_h)
+            scale2: float = nox.mathx.max(ratio_x2, ratio_y2)
+            scaled_w2: int = _clamp_min_1(int(float(in_w) * scale2 + 0.5))
+            scaled_h2: int = _clamp_min_1(int(float(in_h) * scale2 + 0.5))
+            if scaled_w2 < target_w:
+                scaled_w2 = target_w
+            if scaled_h2 < target_h:
+                scaled_h2 = target_h
+            return resize_exact(img, scaled_w2, scaled_h2, opt.filter, opt.alpha_safe, opt.linear_light)
+        case ResizeFit.CONTAIN:
+            inside_opt: ResizeOptions = ResizeOptions(opt.filter, ResizeFit.INSIDE, opt.background, opt.alpha_safe, opt.linear_light)
+            fitted: Image = resize_with_options(img, target_w, target_h, inside_opt)
+            pad_x: int = target_w - fitted.width()
+            pad_y: int = target_h - fitted.height()
+            left: int = pad_x // 2
+            right: int = pad_x - left
+            top: int = pad_y // 2
+            bottom: int = pad_y - top
+            if left == 0 and right == 0 and top == 0 and bottom == 0:
+                return fitted
+            return pad_image(fitted, left, top, right, bottom, opt.background)
+        case ResizeFit.COVER:
+            outside_opt: ResizeOptions = ResizeOptions(opt.filter, ResizeFit.OUTSIDE, opt.background, opt.alpha_safe, opt.linear_light)
+            expanded: Image = resize_with_options(img, target_w, target_h, outside_opt)
+            crop_x: int = (expanded.width() - target_w) // 2
+            crop_y: int = (expanded.height() - target_h) // 2
+            if crop_x == 0 and crop_y == 0 and expanded.width() == target_w and expanded.height() == target_h:
+                return expanded
+            return crop_image(expanded, crop_x, crop_y, target_w, target_h)
+
+def resize_image(img: Image, target_w: int, target_h: int, filter: ResampleFilter) -> Image:
+    """Resize img to exact dimensions target_w x target_h with alpha-safe resampling."""
+    return resize_exact(img, target_w, target_h, filter, True, False)
+
+def thumbnail(img: Image, max_w: int, max_h: int, filter: ResampleFilter) -> Image:
+    """Downscale img proportionally to fit within max_w x max_h without upscaling smaller images."""
+    if max_w <= 0 or max_h <= 0:
+        raise DimensionError("thumbnail max_w and max_h must be positive")
+    if img.width() <= max_w and img.height() <= max_h:
+        return img.clone()
+    opt: ResizeOptions = ResizeOptions.fit_inside(filter)
+    return resize_with_options(img, max_w, max_h, opt)

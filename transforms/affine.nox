@@ -1,0 +1,160 @@
+import nox.mathx
+from core.color import clamp_u8
+from core.errors import DimensionError
+from core.image import Image, MutableImage
+from core.pixel import Pixel
+from transforms.resample import ResampleFilter, require_finite_float
+
+__all__: list[str] = ["AffineMatrix2D", "affine_transform"]
+
+class AffineMatrix2D:
+    """2x3 forward affine matrix mapping source (x, y) -> destination (a*x + b*y + tx, c*x + d*y + ty)."""
+
+    a: float
+    b: float
+    tx: float
+    c: float
+    d: float
+    ty: float
+
+    def __init__(self, a: float, b: float, tx: float, c: float, d: float, ty: float) -> None:
+        self.a = require_finite_float(a, "a")
+        self.b = require_finite_float(b, "b")
+        self.tx = require_finite_float(tx, "tx")
+        self.c = require_finite_float(c, "c")
+        self.d = require_finite_float(d, "d")
+        self.ty = require_finite_float(ty, "ty")
+
+    @staticmethod
+    def identity() -> AffineMatrix2D:
+
+        return AffineMatrix2D(1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+
+    @staticmethod
+    def translation(tx: float, ty: float) -> AffineMatrix2D:
+
+        return AffineMatrix2D(1.0, 0.0, tx, 0.0, 1.0, ty)
+
+    @staticmethod
+    def scaling(sx: float, sy: float) -> AffineMatrix2D:
+
+        require_finite_float(sx, "sx")
+        require_finite_float(sy, "sy")
+        if nox.mathx.abs(sx) <= 1.0e-9 or nox.mathx.abs(sy) <= 1.0e-9:
+            raise DimensionError("affine scaling factors must be non-zero")
+        return AffineMatrix2D(sx, 0.0, 0.0, 0.0, sy, 0.0)
+
+    @staticmethod
+    def rotation_deg(angle_deg: float, cx: float, cy: float) -> AffineMatrix2D:
+
+        require_finite_float(angle_deg, "angle_deg")
+        require_finite_float(cx, "cx")
+        require_finite_float(cy, "cy")
+        rad: float = angle_deg * (nox.mathx.pi() / 180.0)
+        ca: float = nox.mathx.cos(rad)
+        sa: float = nox.mathx.sin(rad)
+        tx: float = cx - ca * cx + sa * cy
+        ty: float = cy - sa * cx - ca * cy
+        return AffineMatrix2D(ca, -sa, tx, sa, ca, ty)
+
+    def determinant(self) -> float:
+
+        return self.a * self.d - self.b * self.c
+
+    def invert(self) -> AffineMatrix2D:
+
+        det: float = self.determinant()
+        if nox.mathx.abs(det) <= 1.0e-12:
+            raise DimensionError("affine matrix is singular and cannot be inverted")
+        inv_det: float = 1.0 / det
+        ia: float = self.d * inv_det
+        ib: float = -self.b * inv_det
+        ic: float = -self.c * inv_det
+        id_val: float = self.a * inv_det
+        itx: float = -(ia * self.tx + ib * self.ty)
+        ity: float = -(ic * self.tx + id_val * self.ty)
+        return AffineMatrix2D(ia, ib, itx, ic, id_val, ity)
+
+def _sample_affine_pixel(img: Image, sx: float, sy: float, bg_px: Pixel, filter: ResampleFilter) -> Pixel:
+    w: int = img.width()
+    h: int = img.height()
+    if sx < -0.5 or sy < -0.5 or sx >= float(w) - 0.5 or sy >= float(h) - 0.5:
+        return bg_px
+
+    if filter == ResampleFilter.NEAREST:
+        nx: int = int(nox.mathx.floor(sx + 0.5))
+        ny: int = int(nox.mathx.floor(sy + 0.5))
+        if nx < 0 or nx >= w or ny < 0 or ny >= h:
+            return bg_px
+        return img.get_pixel(nx, ny)
+
+    x0: int = int(nox.mathx.floor(sx))
+    y0: int = int(nox.mathx.floor(sy))
+    fx: float = sx - float(x0)
+    fy: float = sy - float(y0)
+
+    sum_w: float = 0.0
+    sum_wa: float = 0.0
+    sum_r: float = 0.0
+    sum_g: float = 0.0
+    sum_b: float = 0.0
+
+    dy: int = 0
+    while dy <= 1:
+        wy: float = 1.0 - fy
+        if dy == 1:
+            wy = fy
+        iy: int = y0 + dy
+        dx: int = 0
+        while dx <= 1:
+            wx: float = 1.0 - fx
+            if dx == 1:
+                wx = fx
+            ix: int = x0 + dx
+            w_xy: float = wx * wy
+            px: Pixel = bg_px
+            if ix >= 0 and ix < w and iy >= 0 and iy < h:
+                px = img.get_pixel(ix, iy)
+            sum_w = sum_w + w_xy
+            a_norm: float = float(px.a) / 255.0
+            wa: float = w_xy * a_norm
+            sum_wa = sum_wa + wa
+            sum_r = sum_r + wa * float(px.r)
+            sum_g = sum_g + wa * float(px.g)
+            sum_b = sum_b + wa * float(px.b)
+            dx = dx + 1
+        dy = dy + 1
+
+    if sum_w <= 1.0e-9:
+        return bg_px
+    out_a: int = clamp_u8(int(sum_wa / sum_w * 255.0 + 0.5))
+    if out_a == 0 or sum_wa <= 1.0e-9:
+        return Pixel(bg_px.r, bg_px.g, bg_px.b, 0)
+    return Pixel(clamp_u8(int(sum_r / sum_wa + 0.5)), clamp_u8(int(sum_g / sum_wa + 0.5)), clamp_u8(int(sum_b / sum_wa + 0.5)), out_a)
+
+def affine_transform(img: Image, mat: AffineMatrix2D, out_w: int, out_h: int, bg_px: Pixel, filter: ResampleFilter) -> Image:
+    """Apply a 2x3 forward affine transformation to img using inverse mapping."""
+    if out_w <= 0 or out_h <= 0:
+        raise DimensionError("affine_transform output dimensions must be positive")
+    img.limits.validate_dimensions(out_w, out_h, img.bytes_per_pixel())
+    inv: AffineMatrix2D = mat.invert()
+
+    out_mut: MutableImage = MutableImage.create(out_w, out_h, img.pixel_format(), bg_px, img.limits)
+    dy: int = 0
+    while dy < out_h:
+        fdy: float = float(dy)
+        dx: int = 0
+        while dx < out_w:
+            fdx: float = float(dx)
+            sx: float = inv.a * fdx + inv.b * fdy + inv.tx
+            sy: float = inv.c * fdx + inv.d * fdy + inv.ty
+            px: Pixel = _sample_affine_pixel(img, sx, sy, bg_px, filter)
+            out_mut.set_pixel(dx, dy, px)
+            dx = dx + 1
+        dy = dy + 1
+
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res

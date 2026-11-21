@@ -1,0 +1,73 @@
+from core.errors import DimensionError
+from core.image import Image, MutableImage
+from core.limits import checked_add
+from core.pixel import Pixel
+
+__all__: list[str] = ["CropBoundsPolicy", "crop_image", "crop_with_policy"]
+
+enum CropBoundsPolicy:
+    STRICT
+    CLIP
+    PAD
+
+    def name(self) -> str:
+        match self:
+            case CropBoundsPolicy.STRICT:
+                return "STRICT"
+            case CropBoundsPolicy.CLIP:
+                return "CLIP"
+            case CropBoundsPolicy.PAD:
+                return "PAD"
+
+def crop_image(img: Image, x: int, y: int, w: int, h: int) -> Image:
+    """Strictly crop a sub-rectangle [x, x+w) x [y, y+h) from img."""
+    return img.crop(x, y, w, h)
+
+def crop_with_policy(img: Image, x: int, y: int, w: int, h: int, policy: CropBoundsPolicy, pad_px: Pixel) -> Image:
+    """Crop a sub-rectangle using STRICT, CLIP, or PAD bounds handling."""
+    if w <= 0 or h <= 0:
+        raise DimensionError("crop width and height must be greater than zero")
+
+    src_w: int = img.width()
+    src_h: int = img.height()
+
+    match policy:
+        case CropBoundsPolicy.STRICT:
+            return img.crop(x, y, w, h)
+        case CropBoundsPolicy.CLIP:
+            x0: int = x
+            y0: int = y
+            if x0 < 0:
+                x0 = 0
+            if y0 < 0:
+                y0 = 0
+            x1: int = x + w
+            y1: int = y + h
+            if x1 > src_w:
+                x1 = src_w
+            if y1 > src_h:
+                y1 = src_h
+            clip_w: int = x1 - x0
+            clip_h: int = y1 - y0
+            if clip_w <= 0 or clip_h <= 0:
+                raise DimensionError("clipped crop rectangle has no overlap with source image")
+            return img.crop(x0, y0, clip_w, clip_h)
+        case CropBoundsPolicy.PAD:
+            img.limits.validate_dimensions(w, h, img.bytes_per_pixel())
+            out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), pad_px, img.limits)
+            dy: int = 0
+            while dy < h:
+                sy: int = y + dy
+                if sy >= 0 and sy < src_h:
+                    dx: int = 0
+                    while dx < w:
+                        sx: int = x + dx
+                        if sx >= 0 and sx < src_w:
+                            out_mut.set_pixel(dx, dy, img.get_pixel(sx, sy))
+                        dx = dx + 1
+                dy = dy + 1
+            res: Image = out_mut.to_image()
+            res.color_space = img.color_space
+            res.alpha_mode = img.alpha_mode
+            res.metadata = img.metadata.clone()
+            return res

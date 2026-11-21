@@ -1,0 +1,226 @@
+from core.errors import ColorProfileError, DimensionError
+from core.image import Image, MutableImage
+from core.pixel import AlphaMode, ColorSpace, Pixel
+
+__all__: list[str] = ["clamp_u8", "srgb_to_linear_channel", "linear_to_srgb_channel", "premultiply_pixel", "unpremultiply_pixel", "blend_source_over_straight", "blend_source_over_linear", "image_to_premultiplied", "image_to_straight", "convert_color_space", "blend_images_source_over"]
+
+def clamp_u8(val: int) -> int:
+    if val < 0:
+        return 0
+    if val > 255:
+        return 255
+    return val
+
+def srgb_to_linear_channel(c_u8: int) -> float:
+    """Convert an 8-bit sRGB channel [0..255] to linear light [0.0..1.0]."""
+    clamped: int = clamp_u8(c_u8)
+    s: float = float(clamped) / 255.0
+    if s <= 0.04045:
+        return s / 12.92
+    return ((s + 0.055) / 1.055) ** 2.4
+
+def linear_to_srgb_channel(lin: float) -> int:
+    """Convert linear light [0.0..1.0] to an 8-bit sRGB channel [0..255]."""
+    if lin <= 0.0:
+        return 0
+    if lin >= 1.0:
+        return 255
+    s: float = 0.0
+    if lin <= 0.0031308:
+        s = lin * 12.92
+    else:
+        s = 1.055 * lin ** (1.0 / 2.4) - 0.055
+    scaled: int = int(s * 255.0 + 0.5)
+    return clamp_u8(scaled)
+
+def premultiply_pixel(px: Pixel) -> Pixel:
+    """Convert a straight-alpha Pixel to premultiplied-alpha with integer rounding."""
+    if px.a == 0:
+        return Pixel(0, 0, 0, 0)
+    if px.a == 255:
+        return Pixel(px.r, px.g, px.b, 255)
+    pr: int = (px.r * px.a + 127) // 255
+    pg: int = (px.g * px.a + 127) // 255
+    pb: int = (px.b * px.a + 127) // 255
+    return Pixel(clamp_u8(pr), clamp_u8(pg), clamp_u8(pb), px.a)
+
+def unpremultiply_pixel(px: Pixel) -> Pixel:
+    """Convert a premultiplied-alpha Pixel back to straight-alpha."""
+    if px.a == 0:
+        return Pixel(0, 0, 0, 0)
+    if px.a == 255:
+        return Pixel(px.r, px.g, px.b, 255)
+    half_a: int = px.a // 2
+    sr: int = (px.r * 255 + half_a) // px.a
+    sg: int = (px.g * 255 + half_a) // px.a
+    sb: int = (px.b * 255 + half_a) // px.a
+    return Pixel(clamp_u8(sr), clamp_u8(sg), clamp_u8(sb), px.a)
+
+def blend_source_over_straight(dst: Pixel, src: Pixel) -> Pixel:
+    """Porter-Duff source-over composition in perceptual sRGB straight-alpha space."""
+    if src.a == 255:
+        return Pixel(src.r, src.g, src.b, 255)
+    if src.a == 0:
+        return Pixel(dst.r, dst.g, dst.b, dst.a)
+    inv_sa: int = 255 - src.a
+    out_a_num: int = src.a * 255 + dst.a * inv_sa
+    out_a: int = (out_a_num + 127) // 255
+    if out_a <= 0:
+        return Pixel(0, 0, 0, 0)
+    src_weight: int = src.a * 255
+    dst_weight: int = dst.a * inv_sa
+    out_r: int = (src.r * src_weight + dst.r * dst_weight + out_a_num // 2) // out_a_num
+    out_g: int = (src.g * src_weight + dst.g * dst_weight + out_a_num // 2) // out_a_num
+    out_b: int = (src.b * src_weight + dst.b * dst_weight + out_a_num // 2) // out_a_num
+    return Pixel(clamp_u8(out_r), clamp_u8(out_g), clamp_u8(out_b), clamp_u8(out_a))
+
+def blend_source_over_linear(dst: Pixel, src: Pixel) -> Pixel:
+    """Physically accurate Porter-Duff source-over composition in linear light."""
+    if src.a == 255:
+        return Pixel(src.r, src.g, src.b, 255)
+    if src.a == 0:
+        return Pixel(dst.r, dst.g, dst.b, dst.a)
+
+    sa: float = float(src.a) / 255.0
+    da: float = float(dst.a) / 255.0
+    out_a_f: float = sa + da * (1.0 - sa)
+    out_a: int = clamp_u8(int(out_a_f * 255.0 + 0.5))
+    if out_a == 0 or out_a_f <= 1.0e-9:
+        return Pixel(0, 0, 0, 0)
+
+    sr_lin: float = srgb_to_linear_channel(src.r)
+    sg_lin: float = srgb_to_linear_channel(src.g)
+    sb_lin: float = srgb_to_linear_channel(src.b)
+
+    dr_lin: float = srgb_to_linear_channel(dst.r)
+    dg_lin: float = srgb_to_linear_channel(dst.g)
+    db_lin: float = srgb_to_linear_channel(dst.b)
+
+    out_r_lin: float = (sr_lin * sa + dr_lin * da * (1.0 - sa)) / out_a_f
+    out_g_lin: float = (sg_lin * sa + dg_lin * da * (1.0 - sa)) / out_a_f
+    out_b_lin: float = (sb_lin * sa + db_lin * da * (1.0 - sa)) / out_a_f
+
+    return Pixel(linear_to_srgb_channel(out_r_lin), linear_to_srgb_channel(out_g_lin), linear_to_srgb_channel(out_b_lin), out_a)
+
+def image_to_premultiplied(img: Image) -> Image:
+    """Convert a straight-alpha Image into a premultiplied-alpha Image."""
+    if img.alpha_mode == AlphaMode.PREMULTIPLIED or img.alpha_mode == AlphaMode.OPAQUE:
+        return img.clone()
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            out_mut.set_pixel(x, y, premultiply_pixel(img.get_pixel(x, y)))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = AlphaMode.PREMULTIPLIED
+    res.metadata = img.metadata.clone()
+    return res
+
+def image_to_straight(img: Image) -> Image:
+    """Convert a premultiplied-alpha Image back into a straight-alpha Image."""
+    if img.alpha_mode == AlphaMode.STRAIGHT or img.alpha_mode == AlphaMode.OPAQUE:
+        return img.clone()
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            out_mut.set_pixel(x, y, unpremultiply_pixel(img.get_pixel(x, y)))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = AlphaMode.STRAIGHT
+    res.metadata = img.metadata.clone()
+    return res
+
+def convert_color_space(img: Image, target_space: ColorSpace) -> Image:
+    """Convert an Image between sRGB and LinearSRGB; fail-fast with ColorProfileError for unsupported ICC/wide-gamut spaces."""
+    src_space: ColorSpace = img.color_space
+    if src_space == ColorSpace.DISPLAY_P3 or src_space == ColorSpace.ICC_PROFILE or target_space == ColorSpace.DISPLAY_P3 or target_space == ColorSpace.ICC_PROFILE:
+        raise ColorProfileError("ICC/wide-gamut color space conversion (" + src_space.name() + " -> " + target_space.name() + ") is not available without an ICC profile transform engine")
+    if src_space == ColorSpace.UNKNOWN or target_space == ColorSpace.UNKNOWN:
+        raise ColorProfileError("cannot perform color space conversion involving Unknown color space without explicit profile policy")
+
+    if src_space == target_space:
+        return img.clone()
+
+    # Work on straight-alpha representation during transfer-curve mapping
+    work_img: Image = img
+    was_premult: bool = img.alpha_mode == AlphaMode.PREMULTIPLIED
+    if was_premult:
+        work_img = image_to_straight(img)
+
+    w: int = work_img.width()
+    h: int = work_img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, work_img.pixel_format(), Pixel.transparent(), work_img.limits)
+
+    to_linear: bool = src_space == ColorSpace.SRGB and target_space == ColorSpace.LINEAR_SRGB
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            px: Pixel = work_img.get_pixel(x, y)
+            if to_linear:
+                lr: int = clamp_u8(int(srgb_to_linear_channel(px.r) * 255.0 + 0.5))
+                lg: int = clamp_u8(int(srgb_to_linear_channel(px.g) * 255.0 + 0.5))
+                lb: int = clamp_u8(int(srgb_to_linear_channel(px.b) * 255.0 + 0.5))
+                out_mut.set_pixel(x, y, Pixel(lr, lg, lb, px.a))
+            else:
+                sr: int = linear_to_srgb_channel(float(px.r) / 255.0)
+                sg: int = linear_to_srgb_channel(float(px.g) / 255.0)
+                sb: int = linear_to_srgb_channel(float(px.b) / 255.0)
+                out_mut.set_pixel(x, y, Pixel(sr, sg, sb, px.a))
+            x = x + 1
+        y = y + 1
+
+    res: Image = out_mut.to_image()
+    res.color_space = target_space
+    res.alpha_mode = work_img.alpha_mode
+    res.metadata = img.metadata.clone()
+    if was_premult:
+        return image_to_premultiplied(res)
+    return res
+
+def blend_images_source_over(dst: Image, src: Image, linear_light: bool) -> Image:
+    """Blend src over dst using Porter-Duff source-over (in linear light or perceptual sRGB)."""
+    if dst.width() != src.width() or dst.height() != src.height():
+        raise DimensionError("blend_images_source_over requires equal image dimensions")
+    d_straight: Image = dst
+    if dst.alpha_mode == AlphaMode.PREMULTIPLIED:
+        d_straight = image_to_straight(dst)
+    s_straight: Image = src
+    if src.alpha_mode == AlphaMode.PREMULTIPLIED:
+        s_straight = image_to_straight(src)
+
+    w: int = dst.width()
+    h: int = dst.height()
+    out_mut: MutableImage = MutableImage.create(w, h, dst.pixel_format(), Pixel.transparent(), dst.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            d_px: Pixel = d_straight.get_pixel(x, y)
+            s_px: Pixel = s_straight.get_pixel(x, y)
+            b_px: Pixel = Pixel.transparent()
+            if linear_light:
+                b_px = blend_source_over_linear(d_px, s_px)
+            else:
+                b_px = blend_source_over_straight(d_px, s_px)
+            out_mut.set_pixel(x, y, b_px)
+            x = x + 1
+        y = y + 1
+
+    res: Image = out_mut.to_image()
+    res.color_space = dst.color_space
+    res.alpha_mode = d_straight.alpha_mode
+    res.metadata = dst.metadata.clone()
+    return res

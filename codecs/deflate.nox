@@ -1,0 +1,558 @@
+from nox.buffer import Buffer
+from core.errors import CorruptDataError, ResourceLimitError
+from core.limits import checked_add
+
+__all__: list[str] = ["crc32_bytes", "crc32_span", "adler32_bytes", "zlib_decompress", "zlib_compress"]
+
+def _crc32_step(crc: int, byte_val: int) -> int:
+    c: int = (crc ^ byte_val & 255) & 4294967295
+    bit: int = 0
+    while bit < 8:
+        if c & 1 != 0:
+            c = (c >> 1 ^ 3988292384) & 4294967295
+        else:
+            c = c >> 1 & 4294967295
+        bit = bit + 1
+    return c
+
+def crc32_span(data: Buffer, start: int, length: int) -> int:
+    """Compute IEEE 802.3 CRC-32 over data[start : start + length]."""
+    crc: int = 4294967295
+    end_pos: int = start + length
+    i: int = start
+    while i < end_pos:
+        crc = _crc32_step(crc, int(data.get(i)))
+        i = i + 1
+    return (crc ^ 4294967295) & 4294967295
+
+def crc32_bytes(data: Buffer) -> int:
+    """Compute IEEE 802.3 CRC-32 over an entire Buffer."""
+    return crc32_span(data, 0, data.len())
+
+def adler32_bytes(data: Buffer) -> int:
+    """Compute RFC 1950 Adler-32 checksum over data."""
+    s1: int = 1
+    s2: int = 0
+    n: int = data.len()
+    i: int = 0
+    while i < n:
+        s1 = (s1 + int(data.get(i))) % 65521
+        s2 = (s2 + s1) % 65521
+        i = i + 1
+    return (s2 << 16 | s1) & 4294967295
+
+class _BitReader:
+    data: Buffer
+    byte_pos: int
+    bit_pos: int
+    limit_pos: int
+
+    def __init__(self, data: Buffer, start_pos: int, limit_pos: int) -> None:
+        self.data = data
+        self.byte_pos = start_pos
+        self.bit_pos = 0
+        self.limit_pos = limit_pos
+
+    def read_bit(self) -> int:
+
+        if self.byte_pos >= self.limit_pos:
+            raise CorruptDataError("unexpected end of DEFLATE bit stream")
+        b: int = int(self.data.get(self.byte_pos))
+        bit: int = b >> self.bit_pos & 1
+        self.bit_pos = self.bit_pos + 1
+        if self.bit_pos == 8:
+            self.bit_pos = 0
+            self.byte_pos = self.byte_pos + 1
+        return bit
+
+    def read_bits(self, count: int) -> int:
+
+        val: int = 0
+        i: int = 0
+        while i < count:
+            b: int = self.read_bit()
+            val = val | b << i
+            i = i + 1
+        return val
+
+    def align_to_byte(self) -> None:
+
+        if self.bit_pos != 0:
+            self.bit_pos = 0
+            self.byte_pos = self.byte_pos + 1
+
+    def read_aligned_u8(self) -> int:
+
+        self.align_to_byte()
+        if self.byte_pos >= self.limit_pos:
+            raise CorruptDataError("unexpected end of DEFLATE stream reading aligned byte")
+        v: int = int(self.data.get(self.byte_pos))
+        self.byte_pos = self.byte_pos + 1
+        return v
+
+    def read_aligned_u16_le(self) -> int:
+
+        lo: int = self.read_aligned_u8()
+        hi: int = self.read_aligned_u8()
+        return lo | hi << 8
+
+    def read_aligned_u32_be(self) -> int:
+
+        b0: int = self.read_aligned_u8()
+        b1: int = self.read_aligned_u8()
+        b2: int = self.read_aligned_u8()
+        b3: int = self.read_aligned_u8()
+        return (b0 << 24 | b1 << 16 | b2 << 8 | b3) & 4294967295
+
+class _HuffmanTable:
+    max_bits: int
+    counts: list[int]
+    symbols: list[int]
+
+    def __init__(self, code_lengths: list[int], num_symbols: int) -> None:
+        self.max_bits = 15
+        self.counts = []
+        i: int = 0
+        while i <= 15:
+            self.counts.append(0)
+            i = i + 1
+
+        sym: int = 0
+        while sym < num_symbols:
+            cl: int = code_lengths[sym]
+            if cl < 0 or cl > 15:
+                raise CorruptDataError("invalid Huffman code length in DEFLATE stream")
+            if cl > 0:
+                self.counts[cl] = self.counts[cl] + 1
+            sym = sym + 1
+
+        # Verify code tree is not over-subscribed
+        left: int = 1
+        bits: int = 1
+        while bits <= 15:
+            left = left << 1
+            left = left - self.counts[bits]
+            if left < 0:
+                raise CorruptDataError("over-subscribed Huffman tree in DEFLATE stream")
+            bits = bits + 1
+
+        offsets: list[int] = []
+        i = 0
+        while i <= 15:
+            offsets.append(0)
+            i = i + 1
+
+        total_syms: int = 0
+        bits = 1
+        while bits <= 15:
+            offsets[bits] = total_syms
+            total_syms = total_syms + self.counts[bits]
+            bits = bits + 1
+
+        self.symbols = []
+        i = 0
+        while i < total_syms:
+            self.symbols.append(0)
+            i = i + 1
+
+        sym = 0
+        while sym < num_symbols:
+            cl2: int = code_lengths[sym]
+            if cl2 > 0:
+                pos: int = offsets[cl2]
+                self.symbols[pos] = sym
+                offsets[cl2] = pos + 1
+            sym = sym + 1
+
+    def decode_symbol(self, br: _BitReader) -> int:
+
+        code: int = 0
+        first: int = 0
+        index: int = 0
+        bits: int = 1
+        while bits <= 15:
+            code = code << 1 | br.read_bit()
+            cnt: int = self.counts[bits]
+            if code - first < cnt:
+                return self.symbols[index + (code - first)]
+            index = index + cnt
+            first = first + cnt << 1
+            bits = bits + 1
+        raise CorruptDataError("invalid Huffman code encountered in DEFLATE stream")
+
+def _build_fixed_lit_table() -> _HuffmanTable:
+    lengths: list[int] = []
+    i: int = 0
+    while i < 144:
+        lengths.append(8)
+        i = i + 1
+    while i < 256:
+        lengths.append(9)
+        i = i + 1
+    while i < 280:
+        lengths.append(7)
+        i = i + 1
+    while i < 288:
+        lengths.append(8)
+        i = i + 1
+    return _HuffmanTable(lengths, 288)
+
+def _build_fixed_dist_table() -> _HuffmanTable:
+    lengths: list[int] = []
+    i: int = 0
+    while i < 32:
+        lengths.append(5)
+        i = i + 1
+    return _HuffmanTable(lengths, 32)
+
+LEN_BASE: list[int] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
+
+LEN_EXTRA: list[int] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
+
+DIST_BASE: list[int] = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577]
+
+DIST_EXTRA: list[int] = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+
+CL_ORDER: list[int] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+
+def _decode_huffman_block(br: _BitReader, lit_table: _HuffmanTable, dist_table: _HuffmanTable, out_bytes: list[u8], max_output_bytes: int) -> None:
+    while True:
+        sym: int = lit_table.decode_symbol(br)
+        if sym < 256:
+            if len(out_bytes) >= max_output_bytes:
+                raise ResourceLimitError("DEFLATE stream exceeded max_output_bytes limit (" + str(max_output_bytes) + ")")
+            out_bytes.append(u8(sym))
+        elif sym == 256:
+            break
+        else:
+            len_idx: int = sym - 257
+            if len_idx < 0 or len_idx >= 29:
+                raise CorruptDataError("invalid DEFLATE length symbol: " + str(sym))
+            copy_len: int = LEN_BASE[len_idx] + br.read_bits(LEN_EXTRA[len_idx])
+            dist_sym: int = dist_table.decode_symbol(br)
+            if dist_sym < 0 or dist_sym >= 30:
+                raise CorruptDataError("invalid DEFLATE distance symbol: " + str(dist_sym))
+            dist: int = DIST_BASE[dist_sym] + br.read_bits(DIST_EXTRA[dist_sym])
+            cur_len: int = len(out_bytes)
+            if dist <= 0 or dist > cur_len:
+                raise CorruptDataError("DEFLATE backward distance " + str(dist) + " exceeds current output length " + str(cur_len))
+            if cur_len + copy_len > max_output_bytes:
+                raise ResourceLimitError("DEFLATE back-reference expansion exceeded max_output_bytes limit (" + str(max_output_bytes) + ")")
+            src_idx: int = cur_len - dist
+            k: int = 0
+            while k < copy_len:
+                out_bytes.append(out_bytes[src_idx + k])
+                k = k + 1
+
+def _decode_dynamic_tables(br: _BitReader) -> list[_HuffmanTable]:
+    hlit: int = br.read_bits(5) + 257
+    hdist: int = br.read_bits(5) + 1
+    hclen: int = br.read_bits(4) + 4
+    if hlit > 286 or hdist > 30:
+        raise CorruptDataError("invalid DEFLATE dynamic Huffman header counts")
+
+    cl_lengths: list[int] = []
+    i: int = 0
+    while i < 19:
+        cl_lengths.append(0)
+        i = i + 1
+
+    i = 0
+    while i < hclen:
+        cl_lengths[CL_ORDER[i]] = br.read_bits(3)
+        i = i + 1
+
+    cl_table: _HuffmanTable = _HuffmanTable(cl_lengths, 19)
+    total_codes: int = hlit + hdist
+    all_lengths: list[int] = []
+
+    while len(all_lengths) < total_codes:
+        sym: int = cl_table.decode_symbol(br)
+        if sym >= 0 and sym <= 15:
+            all_lengths.append(sym)
+        elif sym == 16:
+            if len(all_lengths) == 0:
+                raise CorruptDataError("DEFLATE code length 16 repeat with no previous length")
+            prev: int = all_lengths[len(all_lengths) - 1]
+            rep: int = 3 + br.read_bits(2)
+            if len(all_lengths) + rep > total_codes:
+                raise CorruptDataError("DEFLATE code length 16 repeat overflows table")
+            r: int = 0
+            while r < rep:
+                all_lengths.append(prev)
+                r = r + 1
+        elif sym == 17:
+            rep0: int = 3 + br.read_bits(3)
+            if len(all_lengths) + rep0 > total_codes:
+                raise CorruptDataError("DEFLATE code length 17 repeat overflows table")
+            r2: int = 0
+            while r2 < rep0:
+                all_lengths.append(0)
+                r2 = r2 + 1
+        elif sym == 18:
+            rep_long: int = 11 + br.read_bits(7)
+            if len(all_lengths) + rep_long > total_codes:
+                raise CorruptDataError("DEFLATE code length 18 repeat overflows table")
+            r3: int = 0
+            while r3 < rep_long:
+                all_lengths.append(0)
+                r3 = r3 + 1
+        else:
+            raise CorruptDataError("invalid symbol in DEFLATE code length tree")
+
+    lit_lengths: list[int] = []
+    i = 0
+    while i < hlit:
+        lit_lengths.append(all_lengths[i])
+        i = i + 1
+    if hlit <= 256 or lit_lengths[256] == 0:
+        raise CorruptDataError("DEFLATE dynamic literal/length tree missing end-of-block symbol 256")
+
+    dist_lengths: list[int] = []
+    i = 0
+    while i < hdist:
+        dist_lengths.append(all_lengths[hlit + i])
+        i = i + 1
+
+    return [_HuffmanTable(lit_lengths, hlit), _HuffmanTable(dist_lengths, hdist)]
+
+def zlib_decompress(data: Buffer, max_output_bytes: int) -> Buffer:
+    """Decompress an RFC 1950 zlib stream containing RFC 1951 DEFLATE blocks with Adler-32 verification."""
+    total_in: int = data.len()
+    if total_in < 6:
+        raise CorruptDataError("zlib stream is too short (< 6 bytes)")
+
+    cmf: int = int(data.get(0))
+    flg: int = int(data.get(1))
+    cm: int = cmf & 15
+    cinfo: int = cmf >> 4 & 15
+    if cm != 8:
+        raise CorruptDataError("unsupported zlib compression method (expected 8 for DEFLATE)")
+    if cinfo > 7:
+        raise CorruptDataError("invalid zlib window size (CINFO > 7)")
+    if (cmf * 256 + flg) % 31 != 0:
+        raise CorruptDataError("zlib header FCHECK integrity check failed")
+    if flg >> 5 & 1 != 0:
+        raise CorruptDataError("zlib preset dictionary (FDICT) is not permitted in PNG streams")
+
+    br: _BitReader = _BitReader(data, 2, total_in)
+    out_bytes: list[u8] = []
+    fixed_lit: _HuffmanTable = _build_fixed_lit_table()
+    fixed_dist: _HuffmanTable = _build_fixed_dist_table()
+
+    bfinal: int = 0
+    while bfinal == 0:
+        bfinal = br.read_bit()
+        btype: int = br.read_bits(2)
+        if btype == 0:
+            block_len: int = br.read_aligned_u16_le()
+            block_nlen: int = br.read_aligned_u16_le()
+            if (block_len ^ block_nlen) & 65535 != 65535:
+                raise CorruptDataError("DEFLATE stored block LEN/NLEN complement mismatch")
+            if len(out_bytes) + block_len > max_output_bytes:
+                raise ResourceLimitError("DEFLATE stored block exceeded max_output_bytes limit (" + str(max_output_bytes) + ")")
+            i: int = 0
+            while i < block_len:
+                out_bytes.append(u8(br.read_aligned_u8()))
+                i = i + 1
+        elif btype == 1:
+            _decode_huffman_block(br, fixed_lit, fixed_dist, out_bytes, max_output_bytes)
+        elif btype == 2:
+            dyn_tables: list[_HuffmanTable] = _decode_dynamic_tables(br)
+            _decode_huffman_block(br, dyn_tables[0], dyn_tables[1], out_bytes, max_output_bytes)
+        else:
+            raise CorruptDataError("invalid DEFLATE block type 3 (reserved)")
+
+    expected_adler: int = br.read_aligned_u32_be()
+    out_len: int = len(out_bytes)
+    out_buf: Buffer = Buffer(out_len)
+    idx: int = 0
+    while idx < out_len:
+        out_buf.set(idx, out_bytes[idx])
+        idx = idx + 1
+
+    actual_adler: int = adler32_bytes(out_buf)
+    if actual_adler != expected_adler:
+        raise CorruptDataError("zlib Adler-32 checksum mismatch: expected " + str(expected_adler) + ", got " + str(actual_adler))
+    return out_buf
+
+class _BitWriter:
+    bytes_out: list[u8]
+    cur_byte: int
+    bit_count: int
+
+    def __init__(self) -> None:
+        self.bytes_out = []
+        self.cur_byte = 0
+        self.bit_count = 0
+
+    def write_bit(self, bit: int) -> None:
+
+        self.cur_byte = self.cur_byte | (bit & 1) << self.bit_count
+        self.bit_count = self.bit_count + 1
+        if self.bit_count == 8:
+            self.bytes_out.append(u8(self.cur_byte))
+            self.cur_byte = 0
+            self.bit_count = 0
+
+    def write_bits_lsb(self, val: int, count: int) -> None:
+
+        i: int = 0
+        while i < count:
+            self.write_bit(val >> i & 1)
+            i = i + 1
+
+    def write_huff_msb(self, code: int, length: int) -> None:
+
+        i: int = length - 1
+        while i >= 0:
+            self.write_bit(code >> i & 1)
+            i = i - 1
+
+    def flush_to_byte(self) -> None:
+
+        if self.bit_count > 0:
+            self.bytes_out.append(u8(self.cur_byte))
+            self.cur_byte = 0
+            self.bit_count = 0
+
+    def write_u8(self, v: int) -> None:
+
+        self.flush_to_byte()
+        self.bytes_out.append(u8(v & 255))
+
+    def write_u32_be(self, v: int) -> None:
+
+        self.flush_to_byte()
+        self.bytes_out.append(u8(v >> 24 & 255))
+        self.bytes_out.append(u8(v >> 16 & 255))
+        self.bytes_out.append(u8(v >> 8 & 255))
+        self.bytes_out.append(u8(v & 255))
+
+def _write_fixed_literal(bw: _BitWriter, lit: int) -> None:
+    if lit < 144:
+        bw.write_huff_msb(48 + lit, 8)
+    else:
+        bw.write_huff_msb(400 + (lit - 144), 9)
+
+def _write_fixed_eob(bw: _BitWriter) -> None:
+    bw.write_huff_msb(0, 7)
+
+def _write_fixed_length_dist(bw: _BitWriter, length: int, dist: int) -> None:
+    # Find length symbol in LEN_BASE
+    len_idx: int = 28
+    i: int = 0
+    while i < 28:
+        if length >= LEN_BASE[i] and length < LEN_BASE[i + 1]:
+            len_idx = i
+            break
+        i = i + 1
+    sym: int = 257 + len_idx
+    if sym < 280:
+        bw.write_huff_msb(sym - 256, 7)
+    else:
+        bw.write_huff_msb(192 + (sym - 280), 8)
+    extra_l: int = LEN_EXTRA[len_idx]
+    if extra_l > 0:
+        bw.write_bits_lsb(length - LEN_BASE[len_idx], extra_l)
+
+    # Find distance symbol in DIST_BASE
+    dist_idx: int = 29
+    j: int = 0
+    while j < 29:
+        if dist >= DIST_BASE[j] and dist < DIST_BASE[j + 1]:
+            dist_idx = j
+            break
+        j = j + 1
+    bw.write_huff_msb(dist_idx, 5)
+    extra_d: int = DIST_EXTRA[dist_idx]
+    if extra_d > 0:
+        bw.write_bits_lsb(dist - DIST_BASE[dist_idx], extra_d)
+
+def zlib_compress(raw: Buffer) -> Buffer:
+    """Compress a Buffer into an RFC 1950 zlib stream using LZ77 + Fixed Huffman (RFC 1951 type 1)."""
+    bw: _BitWriter = _BitWriter()
+    # RFC 1950 Zlib header: CMF = 0x78 (DEFLATE, 32K window), FLG = 0x9C (default compression, FCHECK valid)
+    bw.write_u8(120)
+    bw.write_u8(156)
+
+    # Single final Fixed Huffman block: BFINAL = 1, BTYPE = 01 (Fixed Huffman)
+    bw.write_bit(1)
+    bw.write_bits_lsb(1, 2)
+
+    n: int = raw.len()
+    # Lightweight hash table mapping 3-byte trigram hash -> most recent index
+    hash_size: int = 4096
+    head: list[int] = []
+    h_idx: int = 0
+    while h_idx < hash_size:
+        head.append(-1)
+        h_idx = h_idx + 1
+
+    pos: int = 0
+    while pos < n:
+        best_len: int = 0
+        best_dist: int = 0
+
+        if pos + 3 <= n:
+            b0: int = int(raw.get(pos))
+            b1: int = int(raw.get(pos + 1))
+            b2: int = int(raw.get(pos + 2))
+            h_val: int = (b0 << 8 ^ b1 << 4 ^ b2) & hash_size - 1
+            prev_pos: int = head[h_val]
+            head[h_val] = pos
+
+            if prev_pos >= 0 and pos - prev_pos <= 32768:
+                dist: int = pos - prev_pos
+                max_len: int = n - pos
+                if max_len > 258:
+                    max_len = 258
+                m_len: int = 0
+                while m_len < max_len and raw.get(prev_pos + m_len) == raw.get(pos + m_len):
+                    m_len = m_len + 1
+                if m_len >= 3:
+                    best_len = m_len
+                    best_dist = dist
+
+        # Also check RLE distance 1 (common in scanline-filtered images)
+        if pos > 0 and pos + 3 <= n:
+            max_rle: int = n - pos
+            if max_rle > 258:
+                max_rle = 258
+            prev_b: u8 = raw.get(pos - 1)
+            rle_len: int = 0
+            while rle_len < max_rle and raw.get(pos + rle_len) == prev_b:
+                rle_len = rle_len + 1
+            if rle_len > best_len and rle_len >= 3:
+                best_len = rle_len
+                best_dist = 1
+
+        if best_len >= 3:
+            _write_fixed_length_dist(bw, best_len, best_dist)
+            step: int = 1
+            while step < best_len:
+                if pos + step + 3 <= n:
+                    sb0: int = int(raw.get(pos + step))
+                    sb1: int = int(raw.get(pos + step + 1))
+                    sb2: int = int(raw.get(pos + step + 2))
+                    sh: int = (sb0 << 8 ^ sb1 << 4 ^ sb2) & hash_size - 1
+                    head[sh] = pos + step
+                step = step + 1
+            pos = pos + best_len
+        else:
+            _write_fixed_literal(bw, int(raw.get(pos)))
+            pos = pos + 1
+
+    _write_fixed_eob(bw)
+    bw.flush_to_byte()
+
+    adler: int = adler32_bytes(raw)
+    bw.write_u32_be(adler)
+
+    total_out: int = len(bw.bytes_out)
+    out_buf: Buffer = Buffer(total_out)
+    k: int = 0
+    while k < total_out:
+        out_buf.set(k, bw.bytes_out[k])
+        k = k + 1
+    return out_buf

@@ -1,0 +1,25 @@
+# Prism Development Roadmap & Phase Status
+
+> **Binding Contract:** [AGENTS.md](../AGENTS.md) §25–§26  
+> **Live Task Checklist:** [todo.md](../todo.md)  
+> **Last Updated:** 2026-11-21
+
+| Phase / Version | Feature / Milestone | Status | `noxc_version` | Target Platforms | Tests | Benchmarks | Known Limits | Date |
+|---|---|---|---|---|---|---|---|---|
+| **F0 (`v0.0.1`)** | Discovery, NOX Audit, Capability Probe, ADR-001, Repo & CI Foundation | **COMPLETED** | `2.2.38` | macOS arm64 verified (LLVM + QBE); Linux/Windows CI configured | `examples/capability_probe.nox` | `benchmarks/perf_baseline.json` | Windows/Linux runners not executed locally | 2026-11-21 |
+| **F1 (`v0.1.0`)** | Safe Pixel Core (`Image`, `MutableImage`, `ImageView`, `Pixel`, `ResourceLimits`, Checked Arithmetic) + PPM/PGM P6/P5 Vertical Slice | **COMPLETED** | `2.2.38` | macOS arm64 verified (LLVM + QBE + Freestanding core) | `tests/unit/core_pixel_test.nox` (26 negative + 1000 random), `tests/unit/facade_test.nox` | 64x64 PPM round-trip & 1000-image property baseline | 16-bit/float pixel ops gated until F12 | 2026-11-21 |
+| **F2 (`v0.2.0`)** | Portable Image I/O, Magic-Byte Sniffing, BMP 24/32-bit, Safe File/Memory Adapters, 10k Header Fuzz | **COMPLETED** | `2.2.38` | macOS arm64 verified (LLVM + QBE); Freestanding sniff/registry | `tests/codecs/portable_codecs_test.nox`, `tests/fuzz/header_fuzz_test.nox` (10,000 fuzzed headers) | 10k header fuzz & BMP 24/32-bit round-trip | BMP RLE/paletted bit depths gated | 2026-11-21 |
+| **F3 (`v0.3.0`)** | Geometry & Resampling Engine (`crop`, `pad`, `flip`, `rotate`, `resize`, `thumbnail`, `affine`, Nearest/Bilinear/Bicubic/Lanczos2/3/Area) | **COMPLETED** | `2.2.38` | macOS arm64 verified (LLVM + QBE + Freestanding transforms) | `tests/unit/geometry_test.nox`, `tests/golden/resample_golden_test.nox` (120 golden cases + alpha halo regression) | 120 golden resampling suite | Perspective 3x3 deferred to advanced phase | 2026-11-21 |
+| **F4 (`v0.4.0`)** | Pure-NOX 8-bit PNG Engine (RFC 1950/1951 Zlib/DEFLATE, Scanline Filters 0–4, CRC32/Adler32, Color Types 0/2/3/4/6) | **COMPLETED** | `2.2.38` | macOS arm64 verified (LLVM + QBE + Freestanding DEFLATE + external macOS `sips` verification) | `tests/codecs/png_test.nox`, `examples/avatar.nox` | PNG adaptive scanline filter + LZ77 round-trip | 16-bit/Adam7 gated until F12 | 2026-11-21 |
+| **F5 (`v0.5.0`)** | Color, Alpha & Metadata Hygiene (sRGB↔Linear, Premultiplied Alpha, EXIF Orientation 1–8, Private Metadata Strip, ICC Carry) | **COMPLETED (MVP)** | `2.2.38` | macOS arm64 verified (LLVM + QBE + Freestanding color/metadata) | `tests/unit/color_metadata_test.nox` | EXIF sanitization & linear blend suite | ICC color transform gated with `ColorProfileError` | 2026-11-21 |
+| **F6 (`v0.6.0`)** | Filters, Enhancement, Convolution, Gaussian Blur, Sobel, Morphology & Image Quality Metrics (PSNR/SSIM) | **NEXT** | `2.2.38` | All targets | Planned (`tests/unit/filters_test.nox`) | Planned | Next active phase | - |
+| **F7 (`v0.7.0`)** | Drawing, Text (Embedded Bitmap Font), Masks & Porter-Duff / Blend Mode Compositing | **PLANNED** | `2.2.38` | All targets | Planned | Planned | - | - |
+| **F8 (`v0.8.0`)** | Optional Native Codec Adapters (JPEG, WebP) with C ABI Isolation & `CodecUnavailableError` Fallback | **PLANNED** | `2.2.38` | Hosted Desktop Targets | Planned | Planned | Opt-in native libraries | - |
+| **F9 (`v0.8.5`)** | Animation & Multi-Frame Formats (`Frame`, `Animation`, GIF LZW/Disposal/Loop) | **PLANNED** | `2.2.38` | All targets | Planned | Planned | - | - |
+| **F10 (`v0.9.0`)** | Pipeline DAG, Safe Algebraic Planner & Halo-Aware Tile Executor | **PLANNED** | `2.2.38` | All targets | Planned (1000 random DAG tests) | Planned | - | - |
+| **F11 (`v0.9.2`)** | Streaming Reader/Writer, Bounded Disk Spill & Parallel Tile/Batch Execution | **PLANNED** | `2.2.38` | Hosted targets | Planned | Planned | - | - |
+| **F12 (`v0.9.4`)** | Advanced Color/Type (`GRAY16`/`RGB16`/`RGBA16`/`RGBAF32`), PNG 16-bit/Adam7, Quantization, Dithering, CLAHE, Canny | **PLANNED** | `2.2.38` | All targets | Planned | Planned | - | - |
+| **F13 (`v0.9.6`)** | `prism` CLI & Ecosystem Adapters (Nyx, Aether, Ember, Aura, SSRF-Safe HTTP) | **PLANNED** | `2.2.38` | Hosted targets | Planned | Planned | - | - |
+| **F14 (`v0.9.8`)** | Portability Verification (`wasm32-wasi`, `wasm32-freestanding`, Freestanding Core, Mobile Audit) | **PLANNED** | `2.2.38` | Cross-platform | Planned | Planned | - | - |
+| **F15 (`v0.9.9`)** | Security Audit, Corpus Fuzzing, Differential Benchmarks & RC Hardening | **PLANNED** | `2.2.38` | Cross-platform | Planned | Planned | - | - |
+| **F16 (`v1.0.0`)** | Prism 1.0 Stable Release | **PLANNED** | `2.2.38` | Cross-platform | Planned (Full suite + 10+ examples) | Planned | - | - |

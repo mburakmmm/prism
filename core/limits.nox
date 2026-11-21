@@ -1,0 +1,177 @@
+from core.errors import DimensionError, ResourceLimitError
+
+__all__: list[str] = ["checked_add", "checked_sub", "checked_mul", "checked_stride", "checked_buffer_size", "ResourceLimits"]
+
+INT64_MAX: int = 9223372036854775807
+
+def checked_add(a: int, b: int) -> int:
+    """Add two non-negative 64-bit integers with overflow detection."""
+    if a < 0 or b < 0:
+        raise DimensionError("checked_add requires non-negative operands")
+    if a > INT64_MAX - b:
+        raise ResourceLimitError("integer addition overflow in image calculation")
+    return a + b
+
+def checked_sub(a: int, b: int) -> int:
+    """Subtract two non-negative 64-bit integers ensuring a non-negative result."""
+    if a < 0 or b < 0 or b > a:
+        raise DimensionError("checked_sub underflow or negative operand")
+    return a - b
+
+def checked_mul(a: int, b: int) -> int:
+    """Multiply two non-negative 64-bit integers with overflow detection."""
+    if a < 0 or b < 0:
+        raise DimensionError("checked_mul requires non-negative operands")
+    if a == 0 or b == 0:
+        return 0
+    if a > INT64_MAX // b:
+        raise ResourceLimitError("integer multiplication overflow in image calculation")
+    return a * b
+
+def checked_stride(width: int, bytes_per_pixel: int, custom_stride: int) -> int:
+    """Validate and return a safe row stride in bytes."""
+    if width <= 0:
+        raise DimensionError("image width must be greater than zero")
+    if bytes_per_pixel <= 0:
+        raise DimensionError("bytes_per_pixel must be greater than zero")
+    min_row_bytes: int = checked_mul(width, bytes_per_pixel)
+    if custom_stride == 0:
+        return min_row_bytes
+    if custom_stride < min_row_bytes:
+        raise DimensionError("custom stride is smaller than width * bytes_per_pixel")
+    return custom_stride
+
+def checked_buffer_size(width: int, height: int, stride: int, bytes_per_pixel: int) -> int:
+    """Compute required buffer byte length as (height - 1) * stride + width * bytes_per_pixel."""
+    if width <= 0 or height <= 0:
+        raise DimensionError("image dimensions must be positive")
+    valid_stride: int = checked_stride(width, bytes_per_pixel, stride)
+    min_row_bytes: int = checked_mul(width, bytes_per_pixel)
+    if height == 1:
+        return min_row_bytes
+    preceding_rows_bytes: int = checked_mul(height - 1, valid_stride)
+    return checked_add(preceding_rows_bytes, min_row_bytes)
+
+class ResourceLimits:
+    """Configurable resource and security budget for decoding, encoding, and pixel buffers."""
+
+    max_width: int
+    max_height: int
+    max_pixels: int
+    max_decoded_bytes: int
+    max_input_bytes: int
+    max_frames: int
+    max_metadata_bytes: int
+    max_chunk_bytes: int
+    max_recursion_depth: int
+    max_output_bytes: int
+    max_temp_bytes: int
+    max_work_ms: int
+
+    def __init__(self, max_width: int, max_height: int, max_pixels: int, max_decoded_bytes: int, max_input_bytes: int, max_frames: int, max_metadata_bytes: int, max_chunk_bytes: int, max_recursion_depth: int, max_output_bytes: int, max_temp_bytes: int, max_work_ms: int) -> None:
+        if max_width <= 0 or max_height <= 0 or max_pixels <= 0:
+            raise DimensionError("ResourceLimits dimensions and max_pixels must be positive")
+        if max_decoded_bytes <= 0 or max_input_bytes <= 0 or max_output_bytes <= 0:
+            raise DimensionError("ResourceLimits byte budgets must be positive")
+        if max_frames <= 0 or max_metadata_bytes < 0 or max_chunk_bytes <= 0:
+            raise DimensionError("ResourceLimits frame, metadata, and chunk limits must be valid")
+        if max_recursion_depth <= 0 or max_temp_bytes < 0 or max_work_ms <= 0:
+            raise DimensionError("ResourceLimits depth, temp, and work time limits must be valid")
+        self.max_width = max_width
+        self.max_height = max_height
+        self.max_pixels = max_pixels
+        self.max_decoded_bytes = max_decoded_bytes
+        self.max_input_bytes = max_input_bytes
+        self.max_frames = max_frames
+        self.max_metadata_bytes = max_metadata_bytes
+        self.max_chunk_bytes = max_chunk_bytes
+        self.max_recursion_depth = max_recursion_depth
+        self.max_output_bytes = max_output_bytes
+        self.max_temp_bytes = max_temp_bytes
+        self.max_work_ms = max_work_ms
+
+    @staticmethod
+    def default() -> ResourceLimits:
+
+        """Default security budget matching AGENTS.md section 6.4."""
+        return ResourceLimits(32768, 32768, 100000000, 536870912, 268435456, 200, 4194304, 67108864, 32, 536870912, 1073741824, 30000)
+
+    @staticmethod
+    def strict_server() -> ResourceLimits:
+
+        """Tighter budget suitable for untrusted public web uploads (e.g. Nyx endpoints)."""
+        return ResourceLimits(8192, 8192, 25000000, 100663296, 16777216, 50, 1048576, 8388608, 16, 67108864, 134217728, 5000)
+
+    @staticmethod
+    def constrained_wasm() -> ResourceLimits:
+
+        """Memory-constrained budget for WebAssembly and embedded targets."""
+        return ResourceLimits(4096, 4096, 16777216, 33554432, 8388608, 24, 262144, 4194304, 16, 33554432, 0, 5000)
+
+    def validate_dimensions(self, width: int, height: int, bytes_per_pixel: int) -> int:
+
+        """Validate width, height, total pixels, and decoded byte size; returns total byte length."""
+        if width <= 0 or height <= 0:
+            raise DimensionError("image width and height must be greater than zero")
+        if bytes_per_pixel <= 0:
+            raise DimensionError("bytes_per_pixel must be greater than zero")
+        if width > self.max_width:
+            raise ResourceLimitError("image width " + str(width) + " exceeds max_width " + str(self.max_width))
+        if height > self.max_height:
+            raise ResourceLimitError("image height " + str(height) + " exceeds max_height " + str(self.max_height))
+        total_pixels: int = checked_mul(width, height)
+        if total_pixels > self.max_pixels:
+            raise ResourceLimitError("image pixel count " + str(total_pixels) + " exceeds max_pixels " + str(self.max_pixels))
+        decoded_bytes: int = checked_mul(total_pixels, bytes_per_pixel)
+        if decoded_bytes > self.max_decoded_bytes:
+            raise ResourceLimitError("decoded byte size " + str(decoded_bytes) + " exceeds max_decoded_bytes " + str(self.max_decoded_bytes))
+        return decoded_bytes
+
+    def validate_stride_and_buffer(self, width: int, height: int, stride: int, bytes_per_pixel: int) -> int:
+
+        """Validate dimensions and custom stride against max_decoded_bytes; returns required bytes."""
+        self.validate_dimensions(width, height, bytes_per_pixel)
+        req_bytes: int = checked_buffer_size(width, height, stride, bytes_per_pixel)
+        if req_bytes > self.max_decoded_bytes:
+            raise ResourceLimitError("strided buffer size " + str(req_bytes) + " exceeds max_decoded_bytes " + str(self.max_decoded_bytes))
+        return req_bytes
+
+    def validate_input_size(self, byte_count: int) -> None:
+
+        if byte_count < 0:
+            raise DimensionError("input byte count cannot be negative")
+        if byte_count > self.max_input_bytes:
+            raise ResourceLimitError("input size " + str(byte_count) + " exceeds max_input_bytes " + str(self.max_input_bytes))
+
+    def validate_output_size(self, byte_count: int) -> None:
+
+        if byte_count < 0:
+            raise DimensionError("output byte count cannot be negative")
+        if byte_count > self.max_output_bytes:
+            raise ResourceLimitError("output size " + str(byte_count) + " exceeds max_output_bytes " + str(self.max_output_bytes))
+
+    def validate_metadata_size(self, byte_count: int) -> None:
+
+        if byte_count < 0:
+            raise DimensionError("metadata byte count cannot be negative")
+        if byte_count > self.max_metadata_bytes:
+            raise ResourceLimitError("metadata size " + str(byte_count) + " exceeds max_metadata_bytes " + str(self.max_metadata_bytes))
+
+    def validate_chunk_size(self, byte_count: int) -> None:
+
+        if byte_count < 0:
+            raise DimensionError("chunk byte count cannot be negative")
+        if byte_count > self.max_chunk_bytes:
+            raise ResourceLimitError("chunk size " + str(byte_count) + " exceeds max_chunk_bytes " + str(self.max_chunk_bytes))
+
+    def validate_frames(self, frame_count: int, width: int, height: int, bytes_per_pixel: int) -> int:
+
+        if frame_count <= 0:
+            raise DimensionError("frame_count must be positive")
+        if frame_count > self.max_frames:
+            raise ResourceLimitError("frame_count " + str(frame_count) + " exceeds max_frames " + str(self.max_frames))
+        single_frame_bytes: int = self.validate_dimensions(width, height, bytes_per_pixel)
+        total_anim_bytes: int = checked_mul(single_frame_bytes, frame_count)
+        if total_anim_bytes > self.max_decoded_bytes:
+            raise ResourceLimitError("total animation decoded bytes " + str(total_anim_bytes) + " exceeds max_decoded_bytes " + str(self.max_decoded_bytes))
+        return total_anim_bytes

@@ -1,0 +1,28 @@
+# Compiled Nox binaries and intermediates
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.ll
+*.s
+*.ssa
+*.wasm
+/prism_bin
+/build/
+/dist/
+/tmp/
+*.nox-tmp
+
+# Test and benchmark artifacts
+/tests/tmp/
+/benchmarks/results/*.tmp
+/examples/*.ppm
+/examples/*.pgm
+/examples/*.bmp
+/examples/*.png
+
+# OS files
+.DS_Store
+Thumbs.db

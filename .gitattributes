@@ -1,0 +1,18 @@
+* text=auto eol=lf
+*.nox text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binary image fixtures must never undergo EOL translation on Windows/POSIX
+*.ppm binary
+*.pgm binary
+*.bmp binary
+*.png binary
+*.gif binary
+*.webp binary
+*.jpg binary
+*.jpeg binary
+*.tif binary
+*.tiff binary

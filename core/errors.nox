@@ -1,0 +1,101 @@
+__all__: list[str] = ["PrismError", "InvalidImageError", "CorruptDataError", "UnsupportedFormatError", "CodecUnavailableError", "UnsupportedPixelFormatError", "ColorProfileError", "ResourceLimitError", "DimensionError", "DecodeError", "EncodeError", "ImageIOError", "PipelineError", "NativeAdapterError"]
+
+class PrismError(Exception):
+    """Base exception for all Prism image processing and codec errors."""
+
+    kind: str
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.kind = "prism_error"
+
+class InvalidImageError(PrismError):
+    """Raised when an image model invariant or pixel argument is invalid."""
+    def __init__(self, message: str) -> None:
+
+        super().__init__(message)
+        self.kind = "invalid_image"
+
+class CorruptDataError(PrismError):
+    """Raised when encoded media bytes are truncated, malformed, or fail checksums."""
+    def __init__(self, message: str) -> None:
+
+        super().__init__(message)
+        self.kind = "corrupt_data"
+
+class UnsupportedFormatError(PrismError):
+    """Raised when an image container format or variant is recognized but unsupported."""
+    def __init__(self, message: str) -> None:
+
+        super().__init__(message)
+        self.kind = "unsupported_format"
+
+class CodecUnavailableError(PrismError):
+    """Raised when a format requires an optional codec adapter not enabled in this build."""
+    def __init__(self, message: str) -> None:
+
+        super().__init__(message)
+        self.kind = "codec_unavailable"
+
+class UnsupportedPixelFormatError(PrismError):
+    """Raised when a bit depth, channel count, or pixel format is not supported by an operation."""
+    def __init__(self, message: str) -> None:
+
+        super().__init__(message)
+        self.kind = "unsupported_pixel_format"
+
+class ColorProfileError(PrismError):
+    """Raised when a color space or ICC profile conversion cannot be performed safely."""
+    def __init__(self, message: str) -> None:
+
+        super().__init__(message)
+        self.kind = "color_profile_error"
+
+class ResourceLimitError(PrismError):
+    """Raised when dimensions, pixel count, memory, frame count, metadata, or arithmetic overflow exceed budget."""
+    def __init__(self, message: str) -> None:
+
+        super().__init__(message)
+        self.kind = "resource_limit_exceeded"
+
+class DimensionError(PrismError):
+    """Raised when width, height, coordinates, crop bounds, or stride parameters are out of range."""
+    def __init__(self, message: str) -> None:
+
+        super().__init__(message)
+        self.kind = "dimension_error"
+
+class DecodeError(PrismError):
+    """Raised when decoding an image stream fails."""
+    def __init__(self, message: str) -> None:
+
+        super().__init__(message)
+        self.kind = "decode_error"
+
+class EncodeError(PrismError):
+    """Raised when encoding an image stream fails."""
+    def __init__(self, message: str) -> None:
+
+        super().__init__(message)
+        self.kind = "encode_error"
+
+class ImageIOError(PrismError):
+    """Raised when file or stream I/O fails or violates path confinement."""
+    def __init__(self, message: str) -> None:
+
+        super().__init__(message)
+        self.kind = "image_io_error"
+
+class PipelineError(PrismError):
+    """Raised when an image pipeline graph or execution step is invalid."""
+    def __init__(self, message: str) -> None:
+
+        super().__init__(message)
+        self.kind = "pipeline_error"
+
+class NativeAdapterError(PrismError):
+    """Raised when an optional native FFI codec or accelerator fails."""
+    def __init__(self, message: str) -> None:
+
+        super().__init__(message)
+        self.kind = "native_adapter_error"

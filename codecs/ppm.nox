@@ -1,0 +1,181 @@
+import nox.bytes
+import nox.fs
+from nox.buffer import Buffer
+from nox.fs import FsError
+from core.errors import CorruptDataError, DimensionError, ImageIOError, UnsupportedFormatError
+from core.image import Image
+from core.limits import checked_add, checked_mul
+from core.metadata import ImageInfo, ImageMetadata
+from core.options import DecodeOptions, EncodeOptions
+from core.pixel import AlphaMode, ColorSpace, Pixel, PixelFormat
+from core.storage import PixelStorage
+
+__all__: list[str] = ["probe_ppm", "encode_ppm", "decode_ppm", "save_ppm", "open_ppm"]
+
+def _is_ws(b: int) -> bool:
+    return b == 32 or b == 9 or b == 10 or b == 13
+
+def _skip_ws_and_comments(data: Buffer, pos: int, total: int) -> int:
+    cur: int = pos
+    while cur < total:
+        b: int = int(data.get(cur))
+        if _is_ws(b):
+            cur = cur + 1
+        elif b == 35:
+            cur = cur + 1
+            while cur < total and int(data.get(cur)) != 10 and int(data.get(cur)) != 13:
+                cur = cur + 1
+        else:
+            return cur
+    return cur
+
+class _ParsedInt:
+    value: int
+    next_pos: int
+
+    def __init__(self, value: int, next_pos: int) -> None:
+        self.value = value
+        self.next_pos = next_pos
+
+def _read_ascii_int(data: Buffer, pos: int, total: int) -> _ParsedInt:
+    cur: int = _skip_ws_and_comments(data, pos, total)
+    if cur >= total:
+        raise CorruptDataError("unexpected end of PPM header while reading integer")
+    digits: int = 0
+    acc: int = 0
+    while cur < total:
+        b: int = int(data.get(cur))
+        if b >= 48 and b <= 57:
+            d: int = b - 48
+            if digits >= 10:
+                raise DimensionError("PPM header integer exceeds safe digit length")
+            acc = acc * 10 + d
+            digits = digits + 1
+            cur = cur + 1
+        elif _is_ws(b) or b == 35:
+            break
+        else:
+            raise CorruptDataError("invalid non-digit byte in PPM header integer")
+    if digits == 0:
+        raise CorruptDataError("expected integer token in PPM header")
+    return _ParsedInt(acc, cur)
+
+class _PpmHeader:
+    width: int
+    height: int
+    maxval: int
+    data_offset: int
+
+    def __init__(self, width: int, height: int, maxval: int, data_offset: int) -> None:
+        self.width = width
+        self.height = height
+        self.maxval = maxval
+        self.data_offset = data_offset
+
+def _parse_ppm_header(data: Buffer, opt: DecodeOptions) -> _PpmHeader:
+    total: int = data.len()
+    opt.limits.validate_input_size(total)
+    if total < 7:
+        raise CorruptDataError("PPM data is too short to contain a valid P6 header")
+    b0: int = int(data.get(0))
+    b1: int = int(data.get(1))
+    if b0 != 80 or b1 != 54:
+        if b0 == 80 and b1 == 51:
+            raise UnsupportedFormatError("ASCII PPM P3 is not supported; use binary P6")
+        raise CorruptDataError("missing PPM P6 magic header")
+    if not _is_ws(int(data.get(2))) and int(data.get(2)) != 35:
+        raise CorruptDataError("PPM P6 magic must be followed by whitespace or comment")
+    w_tok: _ParsedInt = _read_ascii_int(data, 2, total)
+    h_tok: _ParsedInt = _read_ascii_int(data, w_tok.next_pos, total)
+    m_tok: _ParsedInt = _read_ascii_int(data, h_tok.next_pos, total)
+    if w_tok.value <= 0 or h_tok.value <= 0:
+        raise DimensionError("PPM dimensions must be greater than zero")
+    if m_tok.value != 255:
+        if m_tok.value <= 0 or m_tok.value > 65535:
+            raise CorruptDataError("invalid PPM maxval: " + str(m_tok.value))
+        raise UnsupportedFormatError("only 8-bit PPM P6 with maxval=255 is supported (got " + str(m_tok.value) + ")")
+    if m_tok.next_pos >= total or not _is_ws(int(data.get(m_tok.next_pos))):
+        raise CorruptDataError("PPM maxval must be followed by a single whitespace byte")
+    data_offset: int = m_tok.next_pos + 1
+    opt.limits.validate_dimensions(w_tok.value, h_tok.value, 3)
+    return _PpmHeader(w_tok.value, h_tok.value, m_tok.value, data_offset)
+
+def probe_ppm(data: Buffer, opt: DecodeOptions) -> ImageInfo:
+    """Inspect a PPM P6 header without allocating or decoding the pixel buffer."""
+    hdr: _PpmHeader = _parse_ppm_header(data, opt)
+    return ImageInfo(hdr.width, hdr.height, PixelFormat.RGB8, ColorSpace.SRGB, AlphaMode.OPAQUE, 1, "PPM", ImageMetadata.default())
+
+def decode_ppm(data: Buffer, opt: DecodeOptions) -> Image:
+    """Decode a binary PPM (P6) Buffer into an RGB8 Image."""
+    hdr: _PpmHeader = _parse_ppm_header(data, opt)
+    pixel_bytes: int = opt.limits.validate_dimensions(hdr.width, hdr.height, 3)
+    expected_total: int = checked_add(hdr.data_offset, pixel_bytes)
+    if data.len() < expected_total:
+        raise CorruptDataError("truncated PPM P6 payload: expected " + str(pixel_bytes) + " pixel bytes, available " + str(data.len() - hdr.data_offset))
+    buf: Buffer = Buffer(pixel_bytes)
+    i: int = 0
+    while i < pixel_bytes:
+        buf.set(i, data.get(hdr.data_offset + i))
+        i = i + 1
+    row_stride: int = checked_mul(hdr.width, 3)
+    store: PixelStorage = PixelStorage(hdr.width, hdr.height, row_stride, PixelFormat.RGB8, buf, opt.limits)
+    return Image(store, ColorSpace.SRGB, AlphaMode.OPAQUE, ImageMetadata.default(), opt.limits)
+
+def encode_ppm(img: Image, opt: EncodeOptions) -> Buffer:
+    """Encode an Image into a binary PPM (P6) Buffer."""
+    w: int = img.width()
+    h: int = img.height()
+    pixel_bytes: int = opt.limits.validate_dimensions(w, h, 3)
+    header_str: str = "P6\n" + str(w) + " " + str(h) + "\n255\n"
+    header_buf: Buffer = nox.bytes.from_str(header_str)
+    hdr_len: int = header_buf.len()
+    total_out: int = checked_add(hdr_len, pixel_bytes)
+    opt.limits.validate_output_size(total_out)
+    out: Buffer = Buffer(total_out)
+    i: int = 0
+    while i < hdr_len:
+        out.set(i, header_buf.get(i))
+        i = i + 1
+    pos: int = hdr_len
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            px: Pixel = img.get_pixel(x, y)
+            out.set(pos, u8(px.r))
+            out.set(pos + 1, u8(px.g))
+            out.set(pos + 2, u8(px.b))
+            pos = pos + 3
+            x = x + 1
+        y = y + 1
+    return out
+
+def save_ppm(img: Image, path: str, opt: EncodeOptions) -> None:
+    """Encode and save an Image as a PPM P6 file with no-clobber and atomic write support."""
+    if path == "":
+        raise ImageIOError("output file path cannot be empty")
+    if not opt.overwrite and nox.fs.exists(path):
+        raise ImageIOError("refusing to overwrite existing file without overwrite=True: " + path)
+    encoded: Buffer = encode_ppm(img, opt)
+    raw_text: str = nox.bytes.to_str(encoded)
+    try:
+        if opt.atomic_write:
+            nox.fs.write_string_atomic(path, raw_text)
+        else:
+            nox.fs.write_string(path, raw_text)
+    except FsError as err:
+        raise ImageIOError("failed to write PPM file: " + err.message)
+
+def open_ppm(path: str, opt: DecodeOptions) -> Image:
+    """Read and decode a PPM P6 file from disk."""
+    if path == "":
+        raise ImageIOError("input file path cannot be empty")
+    raw_text: str = ""
+    try:
+        meta: nox.fs.FileMetadata = nox.fs.metadata(path)
+        opt.limits.validate_input_size(meta.size)
+        raw_text = nox.fs.read_to_string(path)
+    except FsError as err:
+        raise ImageIOError("failed to read PPM file: " + err.message)
+    data: Buffer = nox.bytes.from_str(raw_text)
+    return decode_ppm(data, opt)

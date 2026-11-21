@@ -1,0 +1,113 @@
+import nox.bytes
+import nox.test
+from nox.buffer import Buffer
+from prism import DecodeOptions, PrismError, ResourceLimits, decode, probe
+
+def _build_mutated_header(iter_idx: int, seed: int) -> Buffer:
+    family: int = iter_idx % 8
+    length: int = seed % 72
+    buf: Buffer = Buffer(length)
+
+    # Fill with pseudo-random bytes first
+    s: int = seed
+    i: int = 0
+    while i < length:
+        s = s * 1103515245 + 12345 & 2147483647
+        buf.set(i, u8(s >> 16 & 255))
+        i = i + 1
+
+    # Inject realistic format magic prefixes and adversarial dimension/offset mutations
+    if family == 0 and length >= 3:
+        # PPM P6 with random/truncated/huge dimensions
+        buf.set(0, u8(80))
+        buf.set(1, u8(54))
+        buf.set(2, u8(10))
+    elif family == 1 and length >= 3:
+        # PGM P5
+        buf.set(0, u8(80))
+        buf.set(1, u8(53))
+        buf.set(2, u8(32))
+    elif family == 2 and length >= 2:
+        # BMP "BM" with mutated DIB size, negative/huge dimensions, invalid bit_count, bad offsets
+        buf.set(0, u8(66))
+        buf.set(1, u8(77))
+        if length >= 18 and iter_idx % 3 == 0:
+            buf.set(14, u8(40))
+            buf.set(15, u8(0))
+            buf.set(16, u8(0))
+            buf.set(17, u8(0))
+    elif family == 3 and length >= 8:
+        # PNG signature
+        buf.set(0, u8(137))
+        buf.set(1, u8(80))
+        buf.set(2, u8(78))
+        buf.set(3, u8(71))
+        buf.set(4, u8(13))
+        buf.set(5, u8(10))
+        buf.set(6, u8(26))
+        buf.set(7, u8(10))
+    elif family == 4 and length >= 3:
+        # JPEG signature
+        buf.set(0, u8(255))
+        buf.set(1, u8(216))
+        buf.set(2, u8(255))
+    elif family == 5 and length >= 6:
+        # GIF89a signature
+        buf.set(0, u8(71))
+        buf.set(1, u8(73))
+        buf.set(2, u8(70))
+        buf.set(3, u8(56))
+        buf.set(4, u8(57))
+        buf.set(5, u8(97))
+    elif family == 6 and length >= 12:
+        # RIFF....WEBP
+        buf.set(0, u8(82))
+        buf.set(1, u8(73))
+        buf.set(2, u8(70))
+        buf.set(3, u8(70))
+        buf.set(8, u8(87))
+        buf.set(9, u8(69))
+        buf.set(10, u8(66))
+        buf.set(11, u8(80))
+
+    return buf
+
+def run_10k_malformed_header_fuzz() -> None:
+    fuzz_lim: ResourceLimits = ResourceLimits(256, 256, 65536, 262144, 262144, 4, 4096, 65536, 8, 262144, 0, 1000)
+    opt: DecodeOptions = DecodeOptions.with_limits(fuzz_lim)
+
+    # Also test specific edge-case malformed ASCII headers for PPM/PGM
+    edge_headers: list[str] = ["", "P", "P6", "P6\n", "P6\n0 10\n255\n", "P6\n10 0\n255\n", "P6\n-5 10\n255\n", "P6\n999999999999999 10\n255\n", "P6\n1000 1000\n255\n", "P6\n2 2\n65535\n123456789012", "P6\n2 2\n0\n123456789012", "P6\n# endless comment without newline", "P5\n10 10\n255\n123", "P2\n1 1\n255\n0\n", "P3\n1 1\n255\n0 0 0\n", "BM12345"]
+    e_idx: int = 0
+    while e_idx < len(edge_headers):
+        ebuf: Buffer = nox.bytes.from_str(edge_headers[e_idx])
+        caught_edge: bool = False
+        try:
+            decode(ebuf, opt)
+        except PrismError:
+            caught_edge = True
+        nox.test.assert_true(caught_edge, "edge malformed header " + str(e_idx) + " must raise PrismError")
+        e_idx = e_idx + 1
+
+    seed: int = 987654321
+    total_iterations: int = 10000
+    prism_err_count: int = 0
+    valid_decodes: int = 0
+
+    i: int = 0
+    while i < total_iterations:
+        seed = seed * 1664525 + 1013904223 & 2147483647
+        fuzzed: Buffer = _build_mutated_header(i, seed)
+        try:
+            probe(fuzzed, opt)
+            decode(fuzzed, opt)
+            valid_decodes = valid_decodes + 1
+        except PrismError:
+            prism_err_count = prism_err_count + 1
+        i = i + 1
+
+    nox.test.assert_eq_int(prism_err_count + valid_decodes, total_iterations, "all 10,000 fuzzed inputs handled cleanly without unhandled exception or crash")
+    nox.test.assert_true(prism_err_count >= 9900, "malformed headers raised typed PrismError")
+    print("header_fuzz_test-ok:", total_iterations, "iterations,", prism_err_count, "rejected cleanly")
+
+run_10k_malformed_header_fuzz()

@@ -1,0 +1,731 @@
+import nox.bytes
+import nox.fs
+from nox.binary import BinaryWriter
+from nox.buffer import Buffer
+from nox.fs import FsError
+from codecs.deflate import crc32_span, zlib_compress, zlib_decompress
+from core.errors import CorruptDataError, DimensionError, ImageIOError, ResourceLimitError, UnsupportedFormatError, UnsupportedPixelFormatError
+from core.image import Image
+from core.limits import checked_add, checked_mul
+from core.metadata import ExifSummary, ImageInfo, ImageMetadata, build_minimal_exif_orientation, parse_exif_buffer
+from core.options import DecodeOptions, EncodeOptions
+from core.pixel import AlphaMode, ColorSpace, Pixel, PixelFormat
+from core.storage import PixelStorage
+from transforms.rotate import apply_exif_orientation
+
+__all__: list[str] = ["paeth_predictor", "probe_png", "decode_png", "encode_png", "save_png", "open_png"]
+
+def paeth_predictor(a: int, b: int, c: int) -> int:
+    """RFC 2083 section 6.6 Paeth scanline predictor."""
+    p: int = a + b - c
+    pa: int = abs(p - a)
+    pb: int = abs(p - b)
+    pc: int = abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    if pb <= pc:
+        return b
+    return c
+
+def _check_png_signature(data: Buffer) -> None:
+    if data.len() < 8:
+        raise CorruptDataError("PNG data is shorter than 8-byte PNG signature")
+    if int(data.get(0)) != 137 or int(data.get(1)) != 80 or int(data.get(2)) != 78 or int(data.get(3)) != 71 or int(data.get(4)) != 13 or int(data.get(5)) != 10 or int(data.get(6)) != 26 or int(data.get(7)) != 10:
+        raise CorruptDataError("invalid 8-byte PNG signature")
+
+def _chunk_type_str(data: Buffer, offset: int) -> str:
+    b0: int = int(data.get(offset))
+    b1: int = int(data.get(offset + 1))
+    b2: int = int(data.get(offset + 2))
+    b3: int = int(data.get(offset + 3))
+    return nox.bytes.str_from_list([b0, b1, b2, b3])
+
+def _read_u32_be_at(data: Buffer, offset: int) -> int:
+    b0: int = int(data.get(offset))
+    b1: int = int(data.get(offset + 1))
+    b2: int = int(data.get(offset + 2))
+    b3: int = int(data.get(offset + 3))
+    return (b0 << 24 | b1 << 16 | b2 << 8 | b3) & 4294967295
+
+def _read_u16_be_at(data: Buffer, offset: int) -> int:
+    b0: int = int(data.get(offset))
+    b1: int = int(data.get(offset + 1))
+    return b0 << 8 | b1
+
+def _validate_color_and_depth(color_type: int, bit_depth: int) -> None:
+    if bit_depth == 16:
+        if color_type == 0 or color_type == 2 or color_type == 4 or color_type == 6:
+            raise UnsupportedPixelFormatError("16-bit PNG is not supported in 8-bit core (scheduled for Phase F12)")
+        raise CorruptDataError("invalid PNG color_type=" + str(color_type) + " with bit_depth=16")
+
+    if color_type == 0:
+        if bit_depth != 1 and bit_depth != 2 and bit_depth != 4 and bit_depth != 8:
+            raise CorruptDataError("invalid PNG grayscale bit_depth: " + str(bit_depth))
+    elif color_type == 2:
+        if bit_depth != 8:
+            raise CorruptDataError("invalid PNG RGB bit_depth: " + str(bit_depth))
+    elif color_type == 3:
+        if bit_depth != 1 and bit_depth != 2 and bit_depth != 4 and bit_depth != 8:
+            raise CorruptDataError("invalid PNG indexed palette bit_depth: " + str(bit_depth))
+    elif color_type == 4:
+        if bit_depth != 8:
+            raise CorruptDataError("invalid PNG grayscale+alpha bit_depth: " + str(bit_depth))
+    elif color_type == 6:
+        if bit_depth != 8:
+            raise CorruptDataError("invalid PNG RGBA bit_depth: " + str(bit_depth))
+    else:
+        raise CorruptDataError("invalid PNG color_type: " + str(color_type))
+
+def _target_pixel_format(color_type: int, has_trns: bool) -> PixelFormat:
+    if color_type == 0:
+        if has_trns:
+            return PixelFormat.RGBA8
+        return PixelFormat.GRAY8
+    if color_type == 2:
+        if has_trns:
+            return PixelFormat.RGBA8
+        return PixelFormat.RGB8
+    if color_type == 3:
+        if has_trns:
+            return PixelFormat.RGBA8
+        return PixelFormat.RGB8
+    return PixelFormat.RGBA8
+
+def _scanline_data_bytes(width: int, color_type: int, bit_depth: int) -> int:
+    channels: int = 1
+    if color_type == 2:
+        channels = 3
+    elif color_type == 4:
+        channels = 2
+    elif color_type == 6:
+        channels = 4
+    bits_per_pixel: int = channels * bit_depth
+    total_bits: int = checked_mul(width, bits_per_pixel)
+    return checked_add(total_bits, 7) // 8
+
+def _filter_bpp(color_type: int, bit_depth: int) -> int:
+    if color_type == 2:
+        return 3
+    if color_type == 4:
+        return 2
+    if color_type == 6:
+        return 4
+    return 1
+
+class _PngParsed:
+    width: int
+    height: int
+    bit_depth: int
+    color_type: int
+    has_plte: bool
+    palette_r: list[int]
+    palette_g: list[int]
+    palette_b: list[int]
+    palette_a: list[int]
+    has_trns: bool
+    trns_gray: int
+    trns_r: int
+    trns_g: int
+    trns_b: int
+    has_iccp: bool
+    iccp_size: int
+    iccp_buf: Buffer
+    orientation: int
+    has_gps: bool
+    has_private: bool
+    comment: str
+    idat_bytes: list[u8]
+
+    def __init__(self) -> None:
+        self.width = 0
+        self.height = 0
+        self.bit_depth = 0
+        self.color_type = 0
+        self.has_plte = False
+        self.palette_r = []
+        self.palette_g = []
+        self.palette_b = []
+        self.palette_a = []
+        self.has_trns = False
+        self.trns_gray = -1
+        self.trns_r = -1
+        self.trns_g = -1
+        self.trns_b = -1
+        self.has_iccp = False
+        self.iccp_size = 0
+        self.iccp_buf = Buffer(0)
+        self.orientation = 1
+        self.has_gps = False
+        self.has_private = False
+        self.comment = ""
+        self.idat_bytes = []
+
+def _slice_chunk_buffer(data: Buffer, start: int, length: int) -> Buffer:
+    out: Buffer = Buffer(length)
+    i: int = 0
+    while i < length:
+        out.set(i, data.get(start + i))
+        i = i + 1
+    return out
+
+def _build_metadata_from_parsed(parsed: _PngParsed, opt: DecodeOptions) -> ImageMetadata:
+    meta: ImageMetadata = ImageMetadata(parsed.orientation, parsed.has_iccp, parsed.iccp_size, opt.strip_private_metadata, "")
+    if parsed.has_iccp and parsed.iccp_buf.len() > 0:
+        meta.set_icc_profile(parsed.iccp_buf, opt.limits)
+    if not opt.strip_private_metadata:
+        meta.has_gps_data = parsed.has_gps
+        meta.has_private_tags = parsed.has_private
+        meta.comment = parsed.comment
+    return meta
+
+def _parse_png_chunks(data: Buffer, opt: DecodeOptions, collect_idat: bool) -> _PngParsed:
+    total: int = data.len()
+    opt.limits.validate_input_size(total)
+    _check_png_signature(data)
+
+    parsed: _PngParsed = _PngParsed()
+    pos: int = 8
+    seen_ihdr: bool = False
+    seen_idat: bool = False
+    seen_iend: bool = False
+    meta_bytes: int = 0
+
+    while pos < total:
+        if pos + 12 > total:
+            raise CorruptDataError("truncated PNG chunk header")
+        chunk_len: int = _read_u32_be_at(data, pos)
+        if chunk_len < 0 or chunk_len > 2147483647:
+            raise CorruptDataError("invalid PNG chunk length")
+        opt.limits.validate_chunk_size(chunk_len)
+        chunk_end: int = checked_add(pos, checked_add(12, chunk_len))
+        if chunk_end > total:
+            raise CorruptDataError("PNG chunk extends past end of file")
+
+        ctype: str = _chunk_type_str(data, pos + 4)
+        data_start: int = pos + 8
+        expected_crc: int = _read_u32_be_at(data, data_start + chunk_len)
+        actual_crc: int = crc32_span(data, pos + 4, 4 + chunk_len)
+        if actual_crc != expected_crc:
+            raise CorruptDataError("PNG chunk CRC-32 mismatch in chunk '" + ctype + "'")
+
+        if not seen_ihdr and ctype != "IHDR":
+            raise CorruptDataError("first PNG chunk must be IHDR")
+
+        if ctype == "IHDR":
+            if seen_ihdr:
+                raise CorruptDataError("duplicate IHDR chunk in PNG")
+            if chunk_len != 13:
+                raise CorruptDataError("PNG IHDR chunk length must be 13")
+            w: int = _read_u32_be_at(data, data_start)
+            h: int = _read_u32_be_at(data, data_start + 4)
+            if w <= 0 or h <= 0 or w > 2147483647 or h > 2147483647:
+                raise DimensionError("invalid PNG IHDR dimensions: " + str(w) + "x" + str(h))
+            bd: int = int(data.get(data_start + 8))
+            ct: int = int(data.get(data_start + 9))
+            comp_m: int = int(data.get(data_start + 10))
+            filt_m: int = int(data.get(data_start + 11))
+            interlace_m: int = int(data.get(data_start + 12))
+
+            if comp_m != 0 or filt_m != 0:
+                raise CorruptDataError("invalid PNG compression or filter method in IHDR")
+            if interlace_m == 1:
+                raise UnsupportedFormatError("PNG Adam7 interlacing is not supported in v0.5.0 (scheduled for Phase F12)")
+            if interlace_m != 0:
+                raise CorruptDataError("invalid PNG interlace method: " + str(interlace_m))
+
+            _validate_color_and_depth(ct, bd)
+            opt.limits.validate_dimensions(w, h, 4)
+            parsed.width = w
+            parsed.height = h
+            parsed.bit_depth = bd
+            parsed.color_type = ct
+            seen_ihdr = True
+        elif ctype == "PLTE":
+            if seen_idat or parsed.has_plte:
+                raise CorruptDataError("misplaced or duplicate PNG PLTE chunk")
+            if chunk_len < 3 or chunk_len > 768 or chunk_len % 3 != 0:
+                raise CorruptDataError("invalid PNG PLTE chunk length: " + str(chunk_len))
+            num_entries: int = chunk_len // 3
+            pi: int = 0
+            while pi < num_entries:
+                parsed.palette_r.append(int(data.get(data_start + pi * 3)))
+                parsed.palette_g.append(int(data.get(data_start + pi * 3 + 1)))
+                parsed.palette_b.append(int(data.get(data_start + pi * 3 + 2)))
+                parsed.palette_a.append(255)
+                pi = pi + 1
+            parsed.has_plte = True
+        elif ctype == "tRNS":
+            if seen_idat or parsed.has_trns:
+                raise CorruptDataError("misplaced or duplicate PNG tRNS chunk")
+            if parsed.color_type == 3:
+                if not parsed.has_plte or chunk_len > len(parsed.palette_a):
+                    raise CorruptDataError("invalid PNG palette tRNS chunk")
+                ti: int = 0
+                while ti < chunk_len:
+                    parsed.palette_a[ti] = int(data.get(data_start + ti))
+                    ti = ti + 1
+                parsed.has_trns = True
+            elif parsed.color_type == 0:
+                if chunk_len != 2:
+                    raise CorruptDataError("PNG grayscale tRNS chunk length must be 2")
+                parsed.trns_gray = _read_u16_be_at(data, data_start) & 255
+                parsed.has_trns = True
+            elif parsed.color_type == 2:
+                if chunk_len != 6:
+                    raise CorruptDataError("PNG truecolor tRNS chunk length must be 6")
+                parsed.trns_r = _read_u16_be_at(data, data_start) & 255
+                parsed.trns_g = _read_u16_be_at(data, data_start + 2) & 255
+                parsed.trns_b = _read_u16_be_at(data, data_start + 4) & 255
+                parsed.has_trns = True
+            else:
+                raise CorruptDataError("tRNS chunk is prohibited for PNG color_type " + str(parsed.color_type))
+        elif ctype == "IDAT":
+            if parsed.color_type == 3 and not parsed.has_plte:
+                raise CorruptDataError("indexed-color PNG is missing required PLTE chunk before IDAT")
+            seen_idat = True
+            if collect_idat:
+                if len(parsed.idat_bytes) + chunk_len > opt.limits.max_input_bytes:
+                    raise ResourceLimitError("combined PNG IDAT stream exceeds max_input_bytes")
+                ii: int = 0
+                while ii < chunk_len:
+                    parsed.idat_bytes.append(data.get(data_start + ii))
+                    ii = ii + 1
+        elif ctype == "IEND":
+            if chunk_len != 0:
+                raise CorruptDataError("PNG IEND chunk must have length 0")
+            seen_iend = True
+            pos = chunk_end
+            break
+        else:
+            first_byte: int = int(data.get(pos + 4))
+            if first_byte & 32 == 0:
+                raise UnsupportedFormatError("unrecognized critical PNG chunk: " + ctype)
+            meta_bytes = checked_add(meta_bytes, chunk_len)
+            opt.limits.validate_metadata_size(meta_bytes)
+            if ctype == "iCCP":
+                if chunk_len < 3:
+                    raise CorruptDataError("PNG iCCP chunk is too short")
+                parsed.has_iccp = True
+                parsed.iccp_size = chunk_len
+                parsed.iccp_buf = _slice_chunk_buffer(data, data_start, chunk_len)
+            elif ctype == "eXIf":
+                exif_buf: Buffer = _slice_chunk_buffer(data, data_start, chunk_len)
+                summary: ExifSummary = parse_exif_buffer(exif_buf, opt.limits)
+                parsed.orientation = summary.orientation
+                parsed.has_gps = summary.has_gps_data
+                parsed.has_private = summary.has_private_tags
+            elif ctype == "tEXt":
+                parsed.has_private = True
+                if not opt.strip_private_metadata and chunk_len > 0:
+                    text_buf: Buffer = _slice_chunk_buffer(data, data_start, chunk_len)
+                    parsed.comment = nox.bytes.to_str(text_buf)
+
+        pos = chunk_end
+
+    if not seen_ihdr or not seen_idat or not seen_iend:
+        raise CorruptDataError("incomplete PNG stream: missing IHDR, IDAT, or IEND chunk")
+    return parsed
+
+def probe_png(data: Buffer, opt: DecodeOptions) -> ImageInfo:
+    """Inspect a PNG stream's chunks and CRC-32 checksums without inflating IDAT pixels."""
+    parsed: _PngParsed = _parse_png_chunks(data, opt, False)
+    fmt: PixelFormat = _target_pixel_format(parsed.color_type, parsed.has_trns)
+    out_bpp: int = fmt.bytes_per_pixel()
+    opt.limits.validate_dimensions(parsed.width, parsed.height, out_bpp)
+
+    alpha: AlphaMode = AlphaMode.OPAQUE
+    if fmt.has_alpha():
+        alpha = AlphaMode.STRAIGHT
+    meta: ImageMetadata = _build_metadata_from_parsed(parsed, opt)
+    return ImageInfo(parsed.width, parsed.height, fmt, ColorSpace.SRGB, alpha, 1, "PNG", meta)
+
+def _unfilter_scanlines(raw_scanlines: Buffer, height: int, row_bytes: int, fbpp: int) -> Buffer:
+    total_unfiltered: int = checked_mul(height, row_bytes)
+    out: Buffer = Buffer(total_unfiltered)
+
+    y: int = 0
+    while y < height:
+        src_row_off: int = y * (row_bytes + 1)
+        filter_type: int = int(raw_scanlines.get(src_row_off))
+        if filter_type < 0 or filter_type > 4:
+            raise CorruptDataError("invalid PNG scanline filter type: " + str(filter_type))
+
+        dst_row_off: int = y * row_bytes
+        prev_row_off: int = (y - 1) * row_bytes
+
+        x: int = 0
+        while x < row_bytes:
+            raw_b: int = int(raw_scanlines.get(src_row_off + 1 + x))
+            a: int = 0
+            if x >= fbpp:
+                a = int(out.get(dst_row_off + x - fbpp))
+            b: int = 0
+            if y > 0:
+                b = int(out.get(prev_row_off + x))
+            c: int = 0
+            if y > 0 and x >= fbpp:
+                c = int(out.get(prev_row_off + x - fbpp))
+
+            recon: int = 0
+            if filter_type == 0:
+                recon = raw_b
+            elif filter_type == 1:
+                recon = raw_b + a & 255
+            elif filter_type == 2:
+                recon = raw_b + b & 255
+            elif filter_type == 3:
+                recon = raw_b + (a + b) // 2 & 255
+            else:
+                recon = raw_b + paeth_predictor(a, b, c) & 255
+
+            out.set(dst_row_off + x, u8(recon))
+            x = x + 1
+        y = y + 1
+
+    return out
+
+def _extract_packed_sample(row_buf: Buffer, row_start: int, x: int, bit_depth: int) -> int:
+    if bit_depth == 8:
+        return int(row_buf.get(row_start + x))
+    if bit_depth == 4:
+        b: int = int(row_buf.get(row_start + x // 2))
+        if x % 2 == 0:
+            return b >> 4 & 15
+        return b & 15
+    if bit_depth == 2:
+        b2: int = int(row_buf.get(row_start + x // 4))
+        shift: int = 6 - x % 4 * 2
+        return b2 >> shift & 3
+    b1: int = int(row_buf.get(row_start + x // 8))
+    shift1: int = 7 - x % 8
+    return b1 >> shift1 & 1
+
+def _scale_subbyte_gray(sample: int, bit_depth: int) -> int:
+    if bit_depth == 8:
+        return sample
+    if bit_depth == 4:
+        return sample * 17
+    if bit_depth == 2:
+        return sample * 85
+    return sample * 255
+
+def decode_png(data: Buffer, opt: DecodeOptions) -> Image:
+    """Decode an 8-bit (or sub-8-bit grayscale/indexed) PNG Buffer into a GRAY8, RGB8, or RGBA8 Image."""
+    parsed: _PngParsed = _parse_png_chunks(data, opt, True)
+    fmt: PixelFormat = _target_pixel_format(parsed.color_type, parsed.has_trns)
+    out_bpp: int = fmt.bytes_per_pixel()
+    total_pixel_bytes: int = opt.limits.validate_dimensions(parsed.width, parsed.height, out_bpp)
+
+    row_data_bytes: int = _scanline_data_bytes(parsed.width, parsed.color_type, parsed.bit_depth)
+    raw_scanline_bytes: int = checked_mul(parsed.height, checked_add(row_data_bytes, 1))
+    if raw_scanline_bytes > opt.limits.max_decoded_bytes:
+        raise ResourceLimitError("PNG scanline buffer exceeds max_decoded_bytes")
+
+    idat_len: int = len(parsed.idat_bytes)
+    idat_buf: Buffer = Buffer(idat_len)
+    i: int = 0
+    while i < idat_len:
+        idat_buf.set(i, parsed.idat_bytes[i])
+        i = i + 1
+
+    inflated: Buffer = zlib_decompress(idat_buf, raw_scanline_bytes)
+    if inflated.len() != raw_scanline_bytes:
+        raise CorruptDataError("inflated PNG IDAT byte count mismatch: expected " + str(raw_scanline_bytes) + ", got " + str(inflated.len()))
+
+    fbpp: int = _filter_bpp(parsed.color_type, parsed.bit_depth)
+    unfiltered: Buffer = _unfilter_scanlines(inflated, parsed.height, row_data_bytes, fbpp)
+
+    out_buf: Buffer = Buffer(total_pixel_bytes)
+    out_stride: int = checked_mul(parsed.width, out_bpp)
+
+    y: int = 0
+    while y < parsed.height:
+        src_row: int = y * row_data_bytes
+        dst_row: int = y * out_stride
+        x: int = 0
+        while x < parsed.width:
+            dst_off: int = dst_row + x * out_bpp
+            if parsed.color_type == 0:
+                raw_g: int = _extract_packed_sample(unfiltered, src_row, x, parsed.bit_depth)
+                g_u8: int = _scale_subbyte_gray(raw_g, parsed.bit_depth)
+                if parsed.has_trns:
+                    a_g: int = 255
+                    if raw_g == parsed.trns_gray:
+                        a_g = 0
+                    out_buf.set(dst_off, u8(g_u8))
+                    out_buf.set(dst_off + 1, u8(g_u8))
+                    out_buf.set(dst_off + 2, u8(g_u8))
+                    out_buf.set(dst_off + 3, u8(a_g))
+                else:
+                    out_buf.set(dst_off, u8(g_u8))
+            elif parsed.color_type == 2:
+                r2: int = int(unfiltered.get(src_row + x * 3))
+                g2: int = int(unfiltered.get(src_row + x * 3 + 1))
+                b2: int = int(unfiltered.get(src_row + x * 3 + 2))
+                out_buf.set(dst_off, u8(r2))
+                out_buf.set(dst_off + 1, u8(g2))
+                out_buf.set(dst_off + 2, u8(b2))
+                if parsed.has_trns:
+                    a2: int = 255
+                    if r2 == parsed.trns_r and g2 == parsed.trns_g and b2 == parsed.trns_b:
+                        a2 = 0
+                    out_buf.set(dst_off + 3, u8(a2))
+            elif parsed.color_type == 3:
+                pal_idx: int = _extract_packed_sample(unfiltered, src_row, x, parsed.bit_depth)
+                if pal_idx < 0 or pal_idx >= len(parsed.palette_r):
+                    raise CorruptDataError("PNG palette index " + str(pal_idx) + " exceeds PLTE size " + str(len(parsed.palette_r)))
+                out_buf.set(dst_off, u8(parsed.palette_r[pal_idx]))
+                out_buf.set(dst_off + 1, u8(parsed.palette_g[pal_idx]))
+                out_buf.set(dst_off + 2, u8(parsed.palette_b[pal_idx]))
+                if parsed.has_trns:
+                    out_buf.set(dst_off + 3, u8(parsed.palette_a[pal_idx]))
+            elif parsed.color_type == 4:
+                g4: u8 = unfiltered.get(src_row + x * 2)
+                a4: u8 = unfiltered.get(src_row + x * 2 + 1)
+                out_buf.set(dst_off, g4)
+                out_buf.set(dst_off + 1, g4)
+                out_buf.set(dst_off + 2, g4)
+                out_buf.set(dst_off + 3, a4)
+            else:
+                out_buf.set(dst_off, unfiltered.get(src_row + x * 4))
+                out_buf.set(dst_off + 1, unfiltered.get(src_row + x * 4 + 1))
+                out_buf.set(dst_off + 2, unfiltered.get(src_row + x * 4 + 2))
+                out_buf.set(dst_off + 3, unfiltered.get(src_row + x * 4 + 3))
+            x = x + 1
+        y = y + 1
+
+    store: PixelStorage = PixelStorage(parsed.width, parsed.height, out_stride, fmt, out_buf, opt.limits)
+    alpha: AlphaMode = AlphaMode.OPAQUE
+    if fmt.has_alpha():
+        alpha = AlphaMode.STRAIGHT
+    meta: ImageMetadata = _build_metadata_from_parsed(parsed, opt)
+    cspace: ColorSpace = ColorSpace.SRGB
+    if not opt.assume_srgb and not parsed.has_iccp:
+        cspace = ColorSpace.UNKNOWN
+    img: Image = Image(store, cspace, alpha, meta, opt.limits)
+
+    if opt.autorotate and parsed.orientation > 1:
+        return apply_exif_orientation(img, parsed.orientation)
+    return img
+
+def _signed_byte_cost(b: int) -> int:
+    v: int = b & 255
+    if v >= 128:
+        return 256 - v
+    return v
+
+def _filter_scanlines_adaptive(raw_pixels: Buffer, height: int, row_bytes: int, fbpp: int) -> Buffer:
+    total_filtered: int = checked_mul(height, checked_add(row_bytes, 1))
+    out: Buffer = Buffer(total_filtered)
+
+    cand0: list[int] = []
+    cand1: list[int] = []
+    cand2: list[int] = []
+    cand3: list[int] = []
+    cand4: list[int] = []
+    i: int = 0
+    while i < row_bytes:
+        cand0.append(0)
+        cand1.append(0)
+        cand2.append(0)
+        cand3.append(0)
+        cand4.append(0)
+        i = i + 1
+
+    y: int = 0
+    while y < height:
+        row_off: int = y * row_bytes
+        prev_off: int = (y - 1) * row_bytes
+        cost0: int = 0
+        cost1: int = 0
+        cost2: int = 0
+        cost3: int = 0
+        cost4: int = 0
+
+        x: int = 0
+        while x < row_bytes:
+            cur: int = int(raw_pixels.get(row_off + x))
+            a: int = 0
+            if x >= fbpp:
+                a = int(raw_pixels.get(row_off + x - fbpp))
+            b: int = 0
+            if y > 0:
+                b = int(raw_pixels.get(prev_off + x))
+            c: int = 0
+            if y > 0 and x >= fbpp:
+                c = int(raw_pixels.get(prev_off + x - fbpp))
+
+            v0: int = cur & 255
+            v1: int = cur - a & 255
+            v2: int = cur - b & 255
+            v3: int = cur - (a + b) // 2 & 255
+            v4: int = cur - paeth_predictor(a, b, c) & 255
+
+            cand0[x] = v0
+            cand1[x] = v1
+            cand2[x] = v2
+            cand3[x] = v3
+            cand4[x] = v4
+
+            cost0 = cost0 + _signed_byte_cost(v0)
+            cost1 = cost1 + _signed_byte_cost(v1)
+            cost2 = cost2 + _signed_byte_cost(v2)
+            cost3 = cost3 + _signed_byte_cost(v3)
+            cost4 = cost4 + _signed_byte_cost(v4)
+            x = x + 1
+
+        best_type: int = 0
+        best_cost: int = cost0
+        if cost1 < best_cost:
+            best_type = 1
+            best_cost = cost1
+        if cost2 < best_cost:
+            best_type = 2
+            best_cost = cost2
+        if cost3 < best_cost:
+            best_type = 3
+            best_cost = cost3
+        if cost4 < best_cost:
+            best_type = 4
+
+        dst_off: int = y * (row_bytes + 1)
+        out.set(dst_off, u8(best_type))
+        k: int = 0
+        while k < row_bytes:
+            chosen: int = cand0[k]
+            if best_type == 1:
+                chosen = cand1[k]
+            elif best_type == 2:
+                chosen = cand2[k]
+            elif best_type == 3:
+                chosen = cand3[k]
+            elif best_type == 4:
+                chosen = cand4[k]
+            out.set(dst_off + 1 + k, u8(chosen))
+            k = k + 1
+        y = y + 1
+
+    return out
+
+def _append_png_chunk(out_list: list[u8], ctype: str, payload: Buffer) -> None:
+    plen: int = payload.len()
+    chunk_buf: Buffer = Buffer(12 + plen)
+    w: BinaryWriter = BinaryWriter(chunk_buf)
+    w.write_u32_be(u32(plen))
+    type_bytes: Buffer = nox.bytes.from_str(ctype)
+    w.write_u8(type_bytes.get(0))
+    w.write_u8(type_bytes.get(1))
+    w.write_u8(type_bytes.get(2))
+    w.write_u8(type_bytes.get(3))
+    i: int = 0
+    while i < plen:
+        w.write_u8(payload.get(i))
+        i = i + 1
+    crc: int = crc32_span(chunk_buf, 4, 4 + plen)
+    w.write_u32_be(u32(crc))
+
+    total_c: int = chunk_buf.len()
+    j: int = 0
+    while j < total_c:
+        out_list.append(chunk_buf.get(j))
+        j = j + 1
+
+def encode_png(img: Image, opt: EncodeOptions) -> Buffer:
+    """Encode an Image into a standard 8-bit PNG Buffer (Color Type 0, 2, or 6)."""
+    w: int = img.width()
+    h: int = img.height()
+    fmt: PixelFormat = img.pixel_format()
+    fmt.require_core_supported()
+
+    color_type: int = 6
+    fbpp: int = 4
+    if fmt == PixelFormat.GRAY8:
+        color_type = 0
+        fbpp = 1
+    elif fmt == PixelFormat.RGB8:
+        color_type = 2
+        fbpp = 3
+
+    opt.limits.validate_dimensions(w, h, fbpp)
+    row_bytes: int = checked_mul(w, fbpp)
+    raw_pixels: Buffer = img.raw_bytes()
+    filtered_scanlines: Buffer = _filter_scanlines_adaptive(raw_pixels, h, row_bytes, fbpp)
+    compressed_idat: Buffer = zlib_compress(filtered_scanlines)
+
+    out_bytes: list[u8] = [u8(137), u8(80), u8(78), u8(71), u8(13), u8(10), u8(26), u8(10)]
+
+    # 13-byte IHDR payload
+    ihdr_buf: Buffer = Buffer(13)
+    ihdr_w: BinaryWriter = BinaryWriter(ihdr_buf)
+    ihdr_w.write_u32_be(u32(w))
+    ihdr_w.write_u32_be(u32(h))
+    ihdr_w.write_u8(u8(8))
+    ihdr_w.write_u8(u8(color_type))
+    ihdr_w.write_u8(u8(0))
+    ihdr_w.write_u8(u8(0))
+    ihdr_w.write_u8(u8(0))
+    _append_png_chunk(out_bytes, "IHDR", ihdr_buf)
+
+    # ICC profile carry-through (bounded by max_metadata_bytes)
+    if img.metadata.has_icc_profile and img.metadata.icc_profile.len() > 0:
+        opt.limits.validate_metadata_size(img.metadata.icc_profile.len())
+        _append_png_chunk(out_bytes, "iCCP", img.metadata.icc_profile)
+    elif img.color_space == ColorSpace.SRGB:
+        srgb_buf: Buffer = Buffer(1)
+        srgb_buf.set(0, u8(0))
+        _append_png_chunk(out_bytes, "sRGB", srgb_buf)
+
+    # Sanitized orientation-only eXIf chunk when orientation != 1
+    if img.metadata.orientation > 1:
+        clean_exif: Buffer = build_minimal_exif_orientation(img.metadata.orientation)
+        _append_png_chunk(out_bytes, "eXIf", clean_exif)
+
+    # Only carry tEXt comment when strip_private_metadata is False
+    if not opt.strip_private_metadata and img.metadata.comment != "":
+        comment_buf: Buffer = nox.bytes.from_str(img.metadata.comment)
+        opt.limits.validate_metadata_size(comment_buf.len())
+        _append_png_chunk(out_bytes, "tEXt", comment_buf)
+
+    # IDAT and IEND chunks
+    _append_png_chunk(out_bytes, "IDAT", compressed_idat)
+    iend_buf: Buffer = Buffer(0)
+    _append_png_chunk(out_bytes, "IEND", iend_buf)
+
+    total_out: int = len(out_bytes)
+    opt.limits.validate_output_size(total_out)
+    final_buf: Buffer = Buffer(total_out)
+    k: int = 0
+    while k < total_out:
+        final_buf.set(k, out_bytes[k])
+        k = k + 1
+    return final_buf
+
+def save_png(img: Image, path: str, opt: EncodeOptions) -> None:
+    """Encode and save an Image as a PNG file with no-clobber and atomic write support."""
+    if path == "":
+        raise ImageIOError("output file path cannot be empty")
+    if not opt.overwrite and nox.fs.exists(path):
+        raise ImageIOError("refusing to overwrite existing file without overwrite=True: " + path)
+    encoded: Buffer = encode_png(img, opt)
+    raw_text: str = nox.bytes.to_str(encoded)
+    try:
+        if opt.atomic_write:
+            nox.fs.write_string_atomic(path, raw_text)
+        else:
+            nox.fs.write_string(path, raw_text)
+    except FsError as err:
+        raise ImageIOError("failed to write PNG file: " + err.message)
+
+def open_png(path: str, opt: DecodeOptions) -> Image:
+    """Read and decode a PNG file from disk."""
+    if path == "":
+        raise ImageIOError("input file path cannot be empty")
+    raw_text: str = ""
+    try:
+        meta: nox.fs.FileMetadata = nox.fs.metadata(path)
+        opt.limits.validate_input_size(meta.size)
+        raw_text = nox.fs.read_to_string(path)
+    except FsError as err:
+        raise ImageIOError("failed to read PNG file: " + err.message)
+    data: Buffer = nox.bytes.from_str(raw_text)
+    return decode_png(data, opt)

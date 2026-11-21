@@ -1,0 +1,390 @@
+import nox.bytes
+import nox.test
+from nox.buffer import Buffer
+from codecs.pgm import decode_pgm, encode_pgm, probe_pgm
+from codecs.ppm import decode_ppm, encode_ppm, probe_ppm
+from core.color import blend_source_over_straight, linear_to_srgb_channel, premultiply_pixel, srgb_to_linear_channel, unpremultiply_pixel
+from core.errors import CorruptDataError, DimensionError, InvalidImageError, PrismError, ResourceLimitError, UnsupportedFormatError, UnsupportedPixelFormatError
+from core.image import Image, ImageView, MutableImage, new_image, new_image_with_format
+from core.limits import ResourceLimits, checked_add, checked_buffer_size, checked_mul, checked_stride, checked_sub
+from core.metadata import ImageInfo, ImageMetadata
+from core.options import DecodeOptions, EncodeOptions
+from core.pixel import AlphaMode, ColorSpace, Pixel, PixelFormat
+from core.storage import PixelStorage
+
+def test_rgba8_2x2_and_views() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+    mut_img: MutableImage = MutableImage.create(2, 2, PixelFormat.RGBA8, Pixel.transparent(), lim)
+    p00: Pixel = Pixel.rgba(255, 0, 0, 255)
+    p10: Pixel = Pixel.rgba(0, 255, 0, 200)
+    p01: Pixel = Pixel.rgba(0, 0, 255, 128)
+    p11: Pixel = Pixel.rgba(255, 255, 0, 64)
+
+    mut_img.set_pixel(0, 0, p00)
+    mut_img.set_pixel(1, 0, p10)
+    mut_img.set_pixel(0, 1, p01)
+    mut_img.set_pixel(1, 1, p11)
+
+    img: Image = mut_img.to_image()
+    nox.test.assert_eq_int(img.width(), 2, "2x2 width")
+    nox.test.assert_eq_int(img.height(), 2, "2x2 height")
+    nox.test.assert_eq_int(img.channels(), 4, "RGBA8 channels")
+    nox.test.assert_eq_int(img.bytes_per_pixel(), 4, "RGBA8 bpp")
+    nox.test.assert_eq_int(img.stride(), 8, "2x2 RGBA8 stride")
+
+    nox.test.assert_true(img.get_pixel(0, 0).equals(p00), "pixel (0,0)")
+    nox.test.assert_true(img.get_pixel(1, 0).equals(p10), "pixel (1,0)")
+    nox.test.assert_true(img.get_pixel(0, 1).equals(p01), "pixel (0,1)")
+    nox.test.assert_true(img.get_pixel(1, 1).equals(p11), "pixel (1,1)")
+
+    cloned: Image = img.clone()
+    nox.test.assert_true(cloned.pixel_equals(img), "cloned image equals original")
+
+    view: ImageView = img.crop_view(1, 0, 1, 2)
+    nox.test.assert_eq_int(view.width, 1, "crop_view width")
+    nox.test.assert_eq_int(view.height, 2, "crop_view height")
+    nox.test.assert_true(view.get_pixel(0, 0).equals(p10), "crop_view (0,0) -> parent (1,0)")
+    nox.test.assert_true(view.get_pixel(0, 1).equals(p11), "crop_view (0,1) -> parent (1,1)")
+
+    sub: ImageView = view.sub_view(0, 1, 1, 1)
+    nox.test.assert_true(sub.get_pixel(0, 0).equals(p11), "sub_view pixel (0,0) -> parent (1,1)")
+
+    cropped: Image = img.crop(0, 1, 2, 1)
+    nox.test.assert_eq_int(cropped.width(), 2, "cropped width")
+    nox.test.assert_eq_int(cropped.height(), 1, "cropped height")
+    nox.test.assert_true(cropped.get_pixel(0, 0).equals(p01), "cropped (0,0)")
+    nox.test.assert_true(cropped.get_pixel(1, 0).equals(p11), "cropped (1,0)")
+
+def test_formats_and_color_math() -> None:
+    img_rgba: Image = new_image(4, 4, Pixel.rgba(100, 150, 200, 255))
+    img_rgb: Image = img_rgba.convert_format(PixelFormat.RGB8)
+    nox.test.assert_eq_int(img_rgb.channels(), 3, "RGB8 channels")
+    nox.test.assert_true(img_rgb.get_pixel(2, 2).equals(Pixel.rgb(100, 150, 200)), "RGB8 converted pixel")
+
+    img_gray: Image = img_rgb.convert_format(PixelFormat.GRAY8)
+    nox.test.assert_eq_int(img_gray.channels(), 1, "GRAY8 channels")
+    expected_luma: int = Pixel.rgb(100, 150, 200).luma_srgb()
+    nox.test.assert_true(img_gray.get_pixel(2, 2).equals(Pixel.gray(expected_luma)), "GRAY8 converted pixel")
+
+    c_lin: float = srgb_to_linear_channel(128)
+    c_back: int = linear_to_srgb_channel(c_lin)
+    nox.test.assert_true(abs(c_back - 128) <= 1, "sRGB <-> linear roundtrip")
+
+    straight_px: Pixel = Pixel.rgba(200, 100, 50, 128)
+    pre_px: Pixel = premultiply_pixel(straight_px)
+    unpre_px: Pixel = unpremultiply_pixel(pre_px)
+    nox.test.assert_true(abs(unpre_px.r - 200) <= 2, "premultiply/unpremultiply r")
+    nox.test.assert_true(abs(unpre_px.g - 100) <= 2, "premultiply/unpremultiply g")
+    nox.test.assert_eq_int(unpre_px.a, 128, "premultiply/unpremultiply a")
+
+    dst_px: Pixel = Pixel.rgba(0, 0, 255, 255)
+    src_opaque: Pixel = Pixel.rgba(255, 0, 0, 255)
+    src_zero: Pixel = Pixel.rgba(0, 255, 0, 0)
+    nox.test.assert_true(blend_source_over_straight(dst_px, src_opaque).equals(src_opaque), "source-over opaque replaces dst")
+    nox.test.assert_true(blend_source_over_straight(dst_px, src_zero).equals(dst_px), "source-over transparent preserves dst")
+
+def test_ppm_and_pgm_roundtrip() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+    mut_rgb: MutableImage = MutableImage.create(3, 2, PixelFormat.RGB8, Pixel.black(), lim)
+    mut_rgb.set_pixel(0, 0, Pixel.rgb(255, 0, 0))
+    mut_rgb.set_pixel(1, 0, Pixel.rgb(0, 255, 0))
+    mut_rgb.set_pixel(2, 0, Pixel.rgb(0, 0, 255))
+    mut_rgb.set_pixel(0, 1, Pixel.rgb(255, 255, 0))
+    mut_rgb.set_pixel(1, 1, Pixel.rgb(0, 255, 255))
+    mut_rgb.set_pixel(2, 1, Pixel.rgb(255, 0, 255))
+    src_rgb: Image = mut_rgb.to_image()
+
+    ppm_bytes: Buffer = encode_ppm(src_rgb, EncodeOptions.default())
+    ppm_info: ImageInfo = probe_ppm(ppm_bytes, DecodeOptions.default())
+    nox.test.assert_eq_int(ppm_info.width, 3, "probe_ppm width")
+    nox.test.assert_eq_int(ppm_info.height, 2, "probe_ppm height")
+    nox.test.assert_eq_str(ppm_info.format_name, "PPM", "probe_ppm format_name")
+
+    dec_rgb: Image = decode_ppm(ppm_bytes, DecodeOptions.default())
+    nox.test.assert_true(dec_rgb.pixel_equals(src_rgb), "PPM P6 lossless roundtrip")
+
+    comment_raw: str = "P6\n# Prism test comment\n2 1\n# maxval\n255\n" + nox.bytes.str_from_list([255, 0, 0, 0, 255, 0])
+    comment_ppm: Buffer = nox.bytes.from_str(comment_raw)
+    dec_comment: Image = decode_ppm(comment_ppm, DecodeOptions.default())
+    nox.test.assert_eq_int(dec_comment.width(), 2, "comment PPM width")
+    nox.test.assert_true(dec_comment.get_pixel(0, 0).equals(Pixel.rgb(255, 0, 0)), "comment PPM pixel 0")
+    nox.test.assert_true(dec_comment.get_pixel(1, 0).equals(Pixel.rgb(0, 255, 0)), "comment PPM pixel 1")
+
+    gray_src: Image = src_rgb.convert_format(PixelFormat.GRAY8)
+    pgm_bytes: Buffer = encode_pgm(gray_src, EncodeOptions.default())
+    pgm_info: ImageInfo = probe_pgm(pgm_bytes, DecodeOptions.default())
+    nox.test.assert_eq_int(pgm_info.width, 3, "probe_pgm width")
+    nox.test.assert_eq_int(pgm_info.height, 2, "probe_pgm height")
+    dec_gray: Image = decode_pgm(pgm_bytes, DecodeOptions.default())
+    nox.test.assert_true(dec_gray.pixel_equals(gray_src), "PGM P5 lossless roundtrip")
+
+def test_negative_security_and_boundaries() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+
+    # 1. width == 0
+    c1: bool = False
+    try:
+        new_image(0, 10, Pixel.black())
+    except DimensionError:
+        c1 = True
+    nox.test.assert_true(c1, "neg 1: width == 0 rejected")
+
+    # 2. height == 0
+    c2: bool = False
+    try:
+        new_image(10, 0, Pixel.black())
+    except DimensionError:
+        c2 = True
+    nox.test.assert_true(c2, "neg 2: height == 0 rejected")
+
+    # 3. width < 0
+    c3: bool = False
+    try:
+        new_image(-4, 10, Pixel.black())
+    except DimensionError:
+        c3 = True
+    nox.test.assert_true(c3, "neg 3: width < 0 rejected")
+
+    # 4. height < 0
+    c4: bool = False
+    try:
+        new_image(10, -4, Pixel.black())
+    except DimensionError:
+        c4 = True
+    nox.test.assert_true(c4, "neg 4: height < 0 rejected")
+
+    # 5. width > max_width
+    c5: bool = False
+    try:
+        new_image_with_format(40000, 10, PixelFormat.RGBA8, Pixel.black(), lim)
+    except ResourceLimitError:
+        c5 = True
+    nox.test.assert_true(c5, "neg 5: width > max_width rejected")
+
+    # 6. height > max_height
+    c6: bool = False
+    try:
+        new_image_with_format(10, 40000, PixelFormat.RGBA8, Pixel.black(), lim)
+    except ResourceLimitError:
+        c6 = True
+    nox.test.assert_true(c6, "neg 6: height > max_height rejected")
+
+    # 7. width * height > max_pixels
+    c7: bool = False
+    try:
+        new_image_with_format(20000, 20000, PixelFormat.GRAY8, Pixel.black(), lim)
+    except ResourceLimitError:
+        c7 = True
+    nox.test.assert_true(c7, "neg 7: max_pixels decompression bomb rejected")
+
+    # 8. decoded_bytes > max_decoded_bytes
+    small_lim: ResourceLimits = ResourceLimits(1024, 1024, 1000000, 1024, 1024, 10, 1024, 1024, 8, 1024, 0, 1000)
+    c8: bool = False
+    try:
+        new_image_with_format(32, 32, PixelFormat.RGBA8, Pixel.black(), small_lim)
+    except ResourceLimitError:
+        c8 = True
+    nox.test.assert_true(c8, "neg 8: max_decoded_bytes budget enforced before allocation")
+
+    # 9. checked_mul int64 overflow
+    c9: bool = False
+    try:
+        checked_mul(9223372036854775807, 2)
+    except ResourceLimitError:
+        c9 = True
+    nox.test.assert_true(c9, "neg 9: checked_mul int64 max overflow rejected")
+
+    # 10. checked_add int64 overflow
+    c10: bool = False
+    try:
+        checked_add(9223372036854775807, 1)
+    except ResourceLimitError:
+        c10 = True
+    nox.test.assert_true(c10, "neg 10: checked_add int64 max overflow rejected")
+
+    # 11. checked_sub underflow
+    c11: bool = False
+    try:
+        checked_sub(10, 11)
+    except DimensionError:
+        c11 = True
+    nox.test.assert_true(c11, "neg 11: checked_sub underflow rejected")
+
+    img4: Image = new_image(4, 4, Pixel.black())
+
+    # 12. get_pixel negative X
+    c12: bool = False
+    try:
+        img4.get_pixel(-1, 0)
+    except DimensionError:
+        c12 = True
+    nox.test.assert_true(c12, "neg 12: get_pixel(-1, 0) rejected")
+
+    # 13. get_pixel negative Y
+    c13: bool = False
+    try:
+        img4.get_pixel(0, -1)
+    except DimensionError:
+        c13 = True
+    nox.test.assert_true(c13, "neg 13: get_pixel(0, -1) rejected")
+
+    # 14. get_pixel X == width
+    c14: bool = False
+    try:
+        img4.get_pixel(4, 0)
+    except DimensionError:
+        c14 = True
+    nox.test.assert_true(c14, "neg 14: get_pixel(width, 0) rejected")
+
+    # 15. get_pixel Y == height
+    c15: bool = False
+    try:
+        img4.get_pixel(0, 4)
+    except DimensionError:
+        c15 = True
+    nox.test.assert_true(c15, "neg 15: get_pixel(0, height) rejected")
+
+    # 16. MutableImage.set_pixel out of bounds
+    mut4: MutableImage = img4.to_mutable()
+    c16: bool = False
+    try:
+        mut4.set_pixel(4, 4, Pixel.white())
+    except DimensionError:
+        c16 = True
+    nox.test.assert_true(c16, "neg 16: set_pixel(4, 4) rejected")
+
+    # 17. Pixel channel < 0
+    c17: bool = False
+    try:
+        Pixel.rgba(-1, 0, 0, 255)
+    except InvalidImageError:
+        c17 = True
+    nox.test.assert_true(c17, "neg 17: Pixel channel < 0 rejected")
+
+    # 18. Pixel channel > 255
+    c18: bool = False
+    try:
+        Pixel.rgba(0, 256, 0, 255)
+    except InvalidImageError:
+        c18 = True
+    nox.test.assert_true(c18, "neg 18: Pixel channel > 255 rejected")
+
+    # 19. Invalid custom stride < width * bpp
+    c19: bool = False
+    try:
+        checked_stride(10, 4, 39)
+    except DimensionError:
+        c19 = True
+    nox.test.assert_true(c19, "neg 19: custom stride < width * bpp rejected")
+
+    # 20. Undersized Buffer in Image.from_buffer
+    c20: bool = False
+    try:
+        short_buf: Buffer = Buffer(15)
+        Image.from_buffer(2, 2, 8, PixelFormat.RGBA8, short_buf, lim)
+    except InvalidImageError:
+        c20 = True
+    nox.test.assert_true(c20, "neg 20: undersized Buffer in Image.from_buffer rejected")
+
+    # 21. crop_view out-of-bounds rectangle
+    c21: bool = False
+    try:
+        img4.crop_view(2, 2, 3, 2)
+    except DimensionError:
+        c21 = True
+    nox.test.assert_true(c21, "neg 21: crop_view exceeding right edge rejected")
+
+    # 22. crop_view zero width or height
+    c22: bool = False
+    try:
+        img4.crop_view(0, 0, 0, 2)
+    except DimensionError:
+        c22 = True
+    nox.test.assert_true(c22, "neg 22: crop_view with 0 width rejected")
+
+    # 23. Alias mutation isolation on MutableImage.to_image() and Image.raw_bytes()
+    mut_iso: MutableImage = MutableImage.create(2, 2, PixelFormat.RGBA8, Pixel.black(), lim)
+    mut_iso.set_pixel(0, 0, Pixel.rgba(10, 20, 30, 255))
+    snap_img: Image = mut_iso.to_image()
+    mut_iso.set_pixel(0, 0, Pixel.rgba(250, 250, 250, 255))
+    nox.test.assert_true(snap_img.get_pixel(0, 0).equals(Pixel.rgba(10, 20, 30, 255)), "neg 23a: mutating MutableImage after to_image() must not mutate Image")
+    ext_buf: Buffer = snap_img.raw_bytes()
+    ext_buf.set(0, u8(99))
+    nox.test.assert_eq_int(snap_img.get_pixel(0, 0).r, 10, "neg 23b: mutating raw_bytes() Buffer must not mutate Image")
+
+    # 24. UnsupportedPixelFormatError for RGBAF32 in 8-bit core
+    c24: bool = False
+    try:
+        new_image_with_format(2, 2, PixelFormat.RGBAF32, Pixel.black(), lim)
+    except UnsupportedPixelFormatError:
+        c24 = True
+    nox.test.assert_true(c24, "neg 24: RGBAF32 raises UnsupportedPixelFormatError in 8-bit core")
+
+    # 25. Truncated PPM P6 payload
+    c25: bool = False
+    try:
+        bad_ppm: Buffer = nox.bytes.from_str("P6\n4 4\n255\n\x00\x01\x02")
+        decode_ppm(bad_ppm, DecodeOptions.default())
+    except CorruptDataError:
+        c25 = True
+    nox.test.assert_true(c25, "neg 25: truncated PPM P6 raises CorruptDataError")
+
+    # 26. Unsupported ASCII PPM P3
+    c26: bool = False
+    try:
+        p3_ppm: Buffer = nox.bytes.from_str("P3\n1 1\n255\n255 0 0\n")
+        decode_ppm(p3_ppm, DecodeOptions.default())
+    except UnsupportedFormatError:
+        c26 = True
+    nox.test.assert_true(c26, "neg 26: ASCII PPM P3 raises UnsupportedFormatError")
+
+def test_1000_random_small_images() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+    seed: int = 133742
+    i: int = 0
+    while i < 1000:
+        seed = seed * 1103515245 + 12345 & 2147483647
+        w: int = seed % 16 + 1
+        seed = seed * 1103515245 + 12345 & 2147483647
+        h: int = seed % 16 + 1
+        fmt_idx: int = i % 3
+        fmt: PixelFormat = PixelFormat.RGBA8
+        if fmt_idx == 1:
+            fmt = PixelFormat.RGB8
+        elif fmt_idx == 2:
+            fmt = PixelFormat.GRAY8
+
+        r: int = seed >> 3 & 255
+        g: int = seed >> 11 & 255
+        b: int = seed >> 19 & 255
+        a: int = 255
+        if fmt == PixelFormat.RGBA8:
+            a = seed >> 7 & 255
+        fill_px: Pixel = Pixel.rgba(r, g, b, a)
+        if fmt == PixelFormat.RGB8:
+            fill_px = Pixel.rgb(r, g, b)
+        elif fmt == PixelFormat.GRAY8:
+            fill_px = Pixel.gray(r)
+
+        mut_img: MutableImage = MutableImage.create(w, h, fmt, fill_px, lim)
+        tx: int = seed % w
+        ty: int = seed // 17 % h
+        mark_px: Pixel = Pixel.rgba(255 - r, 255 - g, 255 - b, a)
+        if fmt == PixelFormat.RGB8:
+            mark_px = Pixel.rgb(255 - r, 255 - g, 255 - b)
+        elif fmt == PixelFormat.GRAY8:
+            mark_px = Pixel.gray(255 - r)
+
+        mut_img.set_pixel(tx, ty, mark_px)
+        img: Image = mut_img.to_image()
+        nox.test.assert_true(img.get_pixel(tx, ty).equals(mark_px), "random image case " + str(i) + " set/get pixel")
+        view: ImageView = img.crop_view(tx, ty, 1, 1)
+        nox.test.assert_true(view.get_pixel(0, 0).equals(mark_px), "random image case " + str(i) + " 1x1 crop_view")
+        i = i + 1
+
+test_rgba8_2x2_and_views()
+test_formats_and_color_math()
+test_ppm_and_pgm_roundtrip()
+test_negative_security_and_boundaries()
+test_1000_random_small_images()
+print("core_pixel_test-ok: 2x2, color, ppm/pgm, 26 negative tests, 1000 random image properties passed")

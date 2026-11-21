@@ -1,0 +1,142 @@
+import nox.test
+from prism import Image, MutableImage, Pixel, PixelFormat, ResampleFilter, ResizeFit, ResizeOptions, ResourceLimits, resize_exact, resize_image, resize_with_options, thumbnail
+
+def test_alpha_bleeding_halo_prevention() -> None:
+    """Verify alpha-safe resampling prevents dark RGB halos next to transparent pixels."""
+    lim: ResourceLimits = ResourceLimits.default()
+    mut_img: MutableImage = MutableImage.create(2, 1, PixelFormat.RGBA8, Pixel.transparent(), lim)
+    # Left pixel: completely transparent black (0, 0, 0, 0)
+    mut_img.set_pixel(0, 0, Pixel.rgba(0, 0, 0, 0))
+    # Right pixel: opaque pure bright red (255, 0, 0, 255)
+    mut_img.set_pixel(1, 0, Pixel.rgba(255, 0, 0, 255))
+    src: Image = mut_img.to_image()
+
+    filters: list[ResampleFilter] = [ResampleFilter.BILINEAR, ResampleFilter.BICUBIC, ResampleFilter.LANCZOS2, ResampleFilter.LANCZOS3, ResampleFilter.AREA]
+    i: int = 0
+    while i < len(filters):
+        flt: ResampleFilter = filters[i]
+        res_safe: Image = resize_exact(src, 4, 1, flt, True, False)
+        mid_px: Pixel = res_safe.get_pixel(1, 0)
+        nox.test.assert_true(mid_px.a > 0 and mid_px.a < 255, "transition pixel is semi-transparent")
+        nox.test.assert_eq_int(mid_px.r, 255, "alpha_safe " + flt.name() + " preserves pure red R=255 without black halo bleeding")
+        nox.test.assert_eq_int(mid_px.g, 0, "alpha_safe G=0")
+        nox.test.assert_eq_int(mid_px.b, 0, "alpha_safe B=0")
+        i = i + 1
+
+    # Also verify gamma-aware linear_light high_quality mode on the same boundary
+    hq_res: Image = resize_with_options(src, 4, 1, ResizeOptions.high_quality())
+    hq_mid: Pixel = hq_res.get_pixel(1, 0)
+    nox.test.assert_eq_int(hq_mid.r, 255, "high_quality linear-light Lanczos3 preserves R=255")
+
+def test_fit_modes_and_thumbnail() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+    wide_src: Image = MutableImage.create(20, 10, PixelFormat.RGBA8, Pixel.rgba(100, 180, 240, 255), lim).to_image()
+
+    # 1. FILL: exact 10x10
+    fill_img: Image = resize_with_options(wide_src, 10, 10, ResizeOptions.default())
+    nox.test.assert_eq_int(fill_img.width(), 10, "FILL width")
+    nox.test.assert_eq_int(fill_img.height(), 10, "FILL height")
+
+    # 2. INSIDE: 20x10 inside 10x10 -> 10x5
+    in_img: Image = resize_with_options(wide_src, 10, 10, ResizeOptions.fit_inside(ResampleFilter.BILINEAR))
+    nox.test.assert_eq_int(in_img.width(), 10, "INSIDE width 10")
+    nox.test.assert_eq_int(in_img.height(), 5, "INSIDE height 5")
+
+    # 3. OUTSIDE: 20x10 outside 10x10 -> 20x10
+    out_img: Image = resize_with_options(wide_src, 10, 10, ResizeOptions.fit_outside(ResampleFilter.BILINEAR))
+    nox.test.assert_eq_int(out_img.width(), 20, "OUTSIDE width 20")
+    nox.test.assert_eq_int(out_img.height(), 10, "OUTSIDE height 10")
+
+    # 4. CONTAIN: 20x10 contained in 10x10 -> 10x10 with top=2, bottom=3 letterbox padding
+    pad_bg: Pixel = Pixel.rgba(10, 10, 10, 255)
+    contain_img: Image = resize_with_options(wide_src, 10, 10, ResizeOptions.fit_contain(ResampleFilter.BILINEAR, pad_bg))
+    nox.test.assert_eq_int(contain_img.width(), 10, "CONTAIN width 10")
+    nox.test.assert_eq_int(contain_img.height(), 10, "CONTAIN height 10")
+    nox.test.assert_true(contain_img.get_pixel(5, 0).equals(pad_bg), "CONTAIN top letterbox pad")
+    nox.test.assert_true(contain_img.get_pixel(5, 5).equals(Pixel.rgba(100, 180, 240, 255)), "CONTAIN center content")
+
+    # 5. COVER: 20x10 covering 10x10 -> 10x10 cropped from center
+    cover_img: Image = resize_with_options(wide_src, 10, 10, ResizeOptions.fit_cover(ResampleFilter.BILINEAR))
+    nox.test.assert_eq_int(cover_img.width(), 10, "COVER width 10")
+    nox.test.assert_eq_int(cover_img.height(), 10, "COVER height 10")
+
+    # 6. thumbnail: downscales 20x10 into 8x8 -> 8x4; does not upscale if max_w=40, max_h=40
+    thumb_down: Image = thumbnail(wide_src, 8, 8, ResampleFilter.LANCZOS3)
+    nox.test.assert_eq_int(thumb_down.width(), 8, "thumbnail downscale width")
+    nox.test.assert_eq_int(thumb_down.height(), 4, "thumbnail downscale height")
+
+    thumb_no_up: Image = thumbnail(wide_src, 40, 40, ResampleFilter.LANCZOS3)
+    nox.test.assert_eq_int(thumb_no_up.width(), 20, "thumbnail does not upscale width")
+    nox.test.assert_eq_int(thumb_no_up.height(), 10, "thumbnail does not upscale height")
+
+def test_120_golden_resampling_and_roundtrip_cases() -> None:
+    """Run 120 deterministic golden resampling and 2x->1/2x round-trip quality cases."""
+    lim: ResourceLimits = ResourceLimits.default()
+    filters: list[ResampleFilter] = [ResampleFilter.NEAREST, ResampleFilter.BILINEAR, ResampleFilter.BICUBIC, ResampleFilter.LANCZOS2, ResampleFilter.LANCZOS3, ResampleFilter.AREA]
+    src_widths: list[int] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 12]
+    src_heights: list[int] = [1, 3, 2, 4, 7, 6, 5, 8, 11, 10]
+
+    golden_cases: int = 0
+    s_idx: int = 0
+    while s_idx < len(src_widths):
+        sw: int = src_widths[s_idx]
+        sh: int = src_heights[s_idx]
+
+        # Build smooth gradient image so upscaling and downscaling have bounded reconstruction error
+        mut_grad: MutableImage = MutableImage.create(sw, sh, PixelFormat.RGBA8, Pixel.black(), lim)
+        y: int = 0
+        while y < sh:
+            x: int = 0
+            while x < sw:
+                r_v: int = x * 200 // sw + 20
+                g_v: int = y * 200 // sh + 20
+                b_v: int = (x + y) * 100 // (sw + sh) + 30
+                mut_grad.set_pixel(x, y, Pixel.rgba(r_v, g_v, b_v, 255))
+                x = x + 1
+            y = y + 1
+        grad_img: Image = mut_grad.to_image()
+
+        f_idx: int = 0
+        while f_idx < len(filters):
+            flt: ResampleFilter = filters[f_idx]
+
+            # Case A: Constant color invariance across every filter and dimension
+            const_px: Pixel = Pixel.rgba(77, 144, 211, 255)
+            const_src: Image = MutableImage.create(sw, sh, PixelFormat.RGBA8, const_px, lim).to_image()
+            const_out: Image = resize_image(const_src, sw * 2 + 1, sh * 2 + 1, flt)
+            mid_c: Pixel = const_out.get_pixel(sw, sh)
+            nox.test.assert_true(abs(mid_c.r - 77) <= 1 and abs(mid_c.g - 144) <= 1 and abs(mid_c.b - 211) <= 1, "constant image invariance under " + flt.name())
+            golden_cases = golden_cases + 1
+
+            # Case B: 2x upscale -> 1/2x downscale round-trip reconstruction accuracy
+            up_img: Image = resize_image(grad_img, sw * 2, sh * 2, flt)
+            down_img: Image = resize_image(up_img, sw, sh, flt)
+            nox.test.assert_eq_int(down_img.width(), sw, "roundtrip width")
+            nox.test.assert_eq_int(down_img.height(), sh, "roundtrip height")
+
+            if flt == ResampleFilter.NEAREST:
+                nox.test.assert_true(down_img.pixel_equals(grad_img), "NEAREST 2x -> 1/2x roundtrip is exact identity")
+            else:
+                # Smooth gradient interior/average MAE must remain bounded
+                total_err: int = 0
+                cy: int = 0
+                while cy < sh:
+                    cx: int = 0
+                    while cx < sw:
+                        p_orig: Pixel = grad_img.get_pixel(cx, cy)
+                        p_rec: Pixel = down_img.get_pixel(cx, cy)
+                        total_err = total_err + abs(p_orig.r - p_rec.r) + abs(p_orig.g - p_rec.g)
+                        cx = cx + 1
+                    cy = cy + 1
+                avg_err: int = total_err // (sw * sh * 2)
+                nox.test.assert_true(avg_err <= 35, "smooth gradient 2x->1/2x MAE within tolerance for " + flt.name())
+            golden_cases = golden_cases + 1
+            f_idx = f_idx + 1
+        s_idx = s_idx + 1
+
+    nox.test.assert_eq_int(golden_cases, 120, "120 golden resampling cases executed")
+    print("resample_golden_test-ok:", golden_cases, "golden cases passed")
+
+test_alpha_bleeding_halo_prevention()
+test_fit_modes_and_thumbnail()
+test_120_golden_resampling_and_roundtrip_cases()

@@ -1,0 +1,208 @@
+import nox.bytes
+import nox.strings
+import nox.test
+from nox.binary import BinaryWriter
+from nox.buffer import Buffer
+from prism import AlphaMode, ColorProfileError, ColorSpace, CorruptDataError, DecodeOptions, EncodeOptions, ExifSummary, Image, MutableImage, Pixel, PixelFormat, ResourceLimitError, ResourceLimits, blend_images_source_over, blend_source_over_linear, blend_source_over_straight, build_minimal_exif_orientation, convert_color_space, decode_png, encode_png, image_to_premultiplied, image_to_straight, new_image, parse_exif_buffer, rotate90, sanitize_exif_buffer
+
+def test_alpha_premultiplied_and_linear_blending() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+    mut_img: MutableImage = MutableImage.create(3, 1, PixelFormat.RGBA8, Pixel.transparent(), lim)
+    mut_img.set_pixel(0, 0, Pixel.rgba(200, 100, 50, 0))
+    mut_img.set_pixel(1, 0, Pixel.rgba(200, 100, 50, 128))
+    mut_img.set_pixel(2, 0, Pixel.rgba(200, 100, 50, 255))
+    src: Image = mut_img.to_image()
+
+    pre_img: Image = image_to_premultiplied(src)
+    nox.test.assert_true(pre_img.alpha_mode == AlphaMode.PREMULTIPLIED, "AlphaMode is PREMULTIPLIED")
+    nox.test.assert_true(pre_img.get_pixel(0, 0).equals(Pixel.rgba(0, 0, 0, 0)), "zero-alpha premultiplies to (0,0,0,0)")
+    nox.test.assert_true(pre_img.get_pixel(1, 0).equals(Pixel.rgba(100, 50, 25, 128)), "50% alpha premultiplied channels")
+    nox.test.assert_true(pre_img.get_pixel(2, 0).equals(Pixel.rgba(200, 100, 50, 255)), "opaque alpha premultiplies unchanged")
+
+    back_straight: Image = image_to_straight(pre_img)
+    nox.test.assert_true(back_straight.alpha_mode == AlphaMode.STRAIGHT, "AlphaMode restored to STRAIGHT")
+    nox.test.assert_true(abs(back_straight.get_pixel(1, 0).r - 200) <= 2, "straight round-trip R within rounding tolerance")
+    nox.test.assert_true(back_straight.get_pixel(2, 0).equals(Pixel.rgba(200, 100, 50, 255)), "straight round-trip opaque exact")
+
+    # Linear vs straight blending: 50% red (255,0,0,128) over opaque green (0,255,0,255)
+    red_half: Pixel = Pixel.rgba(255, 0, 0, 128)
+    green_full: Pixel = Pixel.rgba(0, 255, 0, 255)
+    s_blend: Pixel = blend_source_over_straight(green_full, red_half)
+    l_blend: Pixel = blend_source_over_linear(green_full, red_half)
+    nox.test.assert_eq_int(s_blend.a, 255, "blended alpha over opaque dst is 255")
+    nox.test.assert_eq_int(l_blend.a, 255, "linear blended alpha over opaque dst is 255")
+    # In linear light, 0.5 linear luminance maps to ~188 in sRGB (brighter than naive 128 sRGB average!)
+    nox.test.assert_true(l_blend.r > s_blend.r and l_blend.g > s_blend.g, "linear-light blend preserves physical energy (> perceptual midpoint 128)")
+
+    dst_layer: Image = new_image(2, 2, green_full)
+    src_layer: Image = new_image(2, 2, red_half)
+    comp_lin: Image = blend_images_source_over(dst_layer, src_layer, True)
+    nox.test.assert_true(comp_lin.get_pixel(0, 0).equals(l_blend), "blend_images_source_over linear")
+
+def test_color_space_conversion_and_icc_gating() -> None:
+    src: Image = new_image(2, 2, Pixel.rgba(128, 64, 192, 255))
+    lin_img: Image = convert_color_space(src, ColorSpace.LINEAR_SRGB)
+    nox.test.assert_true(lin_img.color_space == ColorSpace.LINEAR_SRGB, "converted to LINEAR_SRGB")
+    # 128 in sRGB is ~0.216 in linear light (~55 in 8-bit linear)
+    nox.test.assert_true(lin_img.get_pixel(0, 0).r < 128, "sRGB 128 maps to lower linear value")
+
+    back_srgb: Image = convert_color_space(lin_img, ColorSpace.SRGB)
+    nox.test.assert_true(back_srgb.color_space == ColorSpace.SRGB, "converted back to SRGB")
+    nox.test.assert_true(abs(back_srgb.get_pixel(0, 0).r - 128) <= 2, "sRGB -> LinearSRGB -> sRGB channel accuracy")
+
+    # Capability gating: attempting DisplayP3 or ICCProfile conversion without ICC transform engine must raise ColorProfileError
+    p3_caught: bool = False
+    try:
+        convert_color_space(src, ColorSpace.DISPLAY_P3)
+    except ColorProfileError:
+        p3_caught = True
+    nox.test.assert_true(p3_caught, "DisplayP3 conversion raises ColorProfileError without ICC engine")
+
+    icc_caught: bool = False
+    try:
+        convert_color_space(src, ColorSpace.ICC_PROFILE)
+    except ColorProfileError:
+        icc_caught = True
+    nox.test.assert_true(icc_caught, "ICCProfile conversion raises ColorProfileError without ICC engine")
+
+    unknown_img: Image = src.clone()
+    unknown_img.color_space = ColorSpace.UNKNOWN
+    unk_caught: bool = False
+    try:
+        convert_color_space(unknown_img, ColorSpace.LINEAR_SRGB)
+    except ColorProfileError:
+        unk_caught = True
+    nox.test.assert_true(unk_caught, "Unknown color space conversion raises ColorProfileError")
+
+def _build_exif_with_gps_and_serial(orientation: int) -> Buffer:
+    """Construct a little-endian TIFF/EXIF block with Orientation, GPSInfoIFDPointer (0x8825), BodySerialNumber (0xA431), and MakerNote (0x927C)."""
+    # Layout (total 110 bytes):
+    # 0..8: "II" (73,73), 42 (2A,00), IFD0 offset = 8 (08,00,00,00)
+    # 8..10: num_entries = 4
+    # 10..22: Entry 0: Tag 0x0112 (Orientation), Type 3 (SHORT), Count 1, Value = orientation
+    # 22..34: Entry 1: Tag 0x8825 (GPSInfoIFDPointer), Type 4 (LONG), Count 1, Offset = 62
+    # 34..46: Entry 2: Tag 0x927C (MakerNote), Type 7 (UNDEFINED), Count 4, Value = "MKR!"
+    # 46..58: Entry 3: Tag 0xA431 (BodySerialNumber), Type 2 (ASCII), Count 16, Offset = 80
+    # 58..62: Next IFD offset = 0
+    # 62..80: GPS IFD: num_entries = 1 (2 bytes) + 12-byte entry (Tag 0x0002 GPSLatitude, Type 2, Count 4, "GPS!") + 4-byte next_ifd=0
+    # 80..96: BodySerialNumber ASCII payload: "SN-SECRET-99887\0"
+    buf: Buffer = Buffer(96)
+    w: BinaryWriter = BinaryWriter(buf)
+    w.write_u8(u8(73))
+    w.write_u8(u8(73))
+    w.write_u16_le(u16(42))
+    w.write_u32_le(u32(8))
+
+    w.write_u16_le(u16(4))
+    # Entry 0: Orientation
+    w.write_u16_le(u16(274))
+    w.write_u16_le(u16(3))
+    w.write_u32_le(u32(1))
+    w.write_u16_le(u16(orientation))
+    w.write_u16_le(u16(0))
+    # Entry 1: GPSInfoIFDPointer -> offset 62
+    w.write_u16_le(u16(34853))
+    w.write_u16_le(u16(4))
+    w.write_u32_le(u32(1))
+    w.write_u32_le(u32(62))
+    # Entry 2: MakerNote inline 4 bytes
+    w.write_u16_le(u16(37500))
+    w.write_u16_le(u16(7))
+    w.write_u32_le(u32(4))
+    w.write_u32_le(u32(559041357))
+    # Entry 3: BodySerialNumber -> offset 80, count 16
+    w.write_u16_le(u16(42033))
+    w.write_u16_le(u16(2))
+    w.write_u32_le(u32(16))
+    w.write_u32_le(u32(80))
+    # Next IFD = 0
+    w.write_u32_le(u32(0))
+
+    # Offset 62: GPS IFD with 1 entry
+    w.write_u16_le(u16(1))
+    w.write_u16_le(u16(2))
+    w.write_u16_le(u16(2))
+    w.write_u32_le(u32(4))
+    w.write_u32_le(u32(559108167))
+    w.write_u32_le(u32(0))
+
+    # Offset 80: "SN-SECRET-99887\0"
+    secret_bytes: Buffer = nox.bytes.from_str("SN-SECRET-99887\x00")
+    i: int = 0
+    while i < 16:
+        w.write_u8(secret_bytes.get(i))
+        i = i + 1
+    return buf
+
+def test_exif_gps_strip_cyclic_ifd_and_autorotate_roundtrip() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+    raw_exif: Buffer = _build_exif_with_gps_and_serial(6)
+
+    summary: ExifSummary = parse_exif_buffer(raw_exif, lim)
+    nox.test.assert_eq_int(summary.orientation, 6, "parsed EXIF orientation 6")
+    nox.test.assert_true(summary.has_gps_data, "parsed EXIF detected GPS IFD")
+    nox.test.assert_true(summary.has_private_tags, "parsed EXIF detected private tags")
+    nox.test.assert_true(nox.strings.contains(nox.bytes.to_str(raw_exif), "SN-SECRET-99887"), "raw EXIF contains camera serial number bytes")
+
+    # Sanitize EXIF buffer and verify byte-level removal of GPS, MakerNote, and serial number
+    cleaned_exif: Buffer = sanitize_exif_buffer(raw_exif, False, lim)
+    nox.test.assert_true(not nox.strings.contains(nox.bytes.to_str(cleaned_exif), "SECRET"), "sanitized EXIF buffer has zero secret serial bytes")
+    nox.test.assert_true(not nox.strings.contains(nox.bytes.to_str(cleaned_exif), "GPS"), "sanitized EXIF buffer has zero GPS bytes")
+    clean_summary: ExifSummary = parse_exif_buffer(cleaned_exif, lim)
+    nox.test.assert_eq_int(clean_summary.orientation, 6, "sanitized EXIF preserves orientation when reset=False")
+    nox.test.assert_true(not clean_summary.has_gps_data, "sanitized EXIF has_gps_data == False")
+    nox.test.assert_true(not clean_summary.has_private_tags, "sanitized EXIF has_private_tags == False")
+
+    # Cyclic IFD pointer attack: IFD0 at offset 8 has next_ifd_offset = 8 (points to itself!)
+    cyclic_exif: Buffer = build_minimal_exif_orientation(1)
+    # Last 4 bytes (offset 22..26) are next_ifd_offset in big-endian; set to 8
+    cyclic_exif.set(25, u8(8))
+    cyclic_caught: bool = False
+    try:
+        parse_exif_buffer(cyclic_exif, lim)
+    except CorruptDataError:
+        cyclic_caught = True
+    nox.test.assert_true(cyclic_caught, "cyclic IFD pointer in EXIF raises CorruptDataError")
+
+    # PNG EXIF orientation round-trip + double-rotate prevention + ICC carry-through
+    mut_rect: MutableImage = MutableImage.create(3, 2, PixelFormat.RGB8, Pixel.black(), lim)
+    mut_rect.set_pixel(0, 0, Pixel.rgb(255, 0, 0))
+    mut_rect.set_pixel(2, 1, Pixel.rgb(0, 255, 0))
+    orig_rect: Image = mut_rect.to_image()
+    orig_rect.metadata.orientation = 6
+    orig_rect.metadata.comment = "Private author note"
+    dummy_icc: Buffer = nox.bytes.from_str("sRGB-ICC-stub\x00\x00\x01\x02\x03")
+    orig_rect.metadata.set_icc_profile(dummy_icc, lim)
+
+    # Encode with default strip_private_metadata=True
+    png_with_meta: Buffer = encode_png(orig_rect, EncodeOptions.default())
+    nox.test.assert_true(not nox.strings.contains(nox.bytes.to_str(png_with_meta), "Private author note"), "strip_private_metadata=True strips private comment from encoded PNG")
+
+    # Decode with default autorotate=True: 3x2 image with orientation=6 (rotate90) becomes 2x3 with orientation=1
+    expected_rot: Image = rotate90(orig_rect)
+    dec_auto: Image = decode_png(png_with_meta, DecodeOptions.default())
+    nox.test.assert_eq_int(dec_auto.width(), 2, "autorotated PNG width swapped to 2")
+    nox.test.assert_eq_int(dec_auto.height(), 3, "autorotated PNG height swapped to 3")
+    nox.test.assert_eq_int(dec_auto.metadata.orientation, 1, "autorotated PNG resets orientation to 1")
+    nox.test.assert_true(dec_auto.pixel_equals(expected_rot), "autorotated PNG pixels match rotate90")
+    nox.test.assert_true(dec_auto.metadata.has_icc_profile, "ICC profile carried through PNG round-trip")
+    nox.test.assert_eq_int(dec_auto.metadata.icc_profile_size, dummy_icc.len(), "carried ICC profile byte length matches")
+
+    # Re-encode and decode a second time: must NOT double-rotate!
+    png_second: Buffer = encode_png(dec_auto, EncodeOptions.default())
+    dec_second: Image = decode_png(png_second, DecodeOptions.default())
+    nox.test.assert_true(dec_second.pixel_equals(dec_auto), "second encode/decode round-trip does not double-rotate")
+
+    # Oversized metadata limit test
+    tiny_meta_lim: ResourceLimits = ResourceLimits(1024, 1024, 1000000, 1048576, 1048576, 10, 8, 65536, 8, 1048576, 0, 1000)
+    meta_limit_caught: bool = False
+    try:
+        decode_png(png_with_meta, DecodeOptions.with_limits(tiny_meta_lim))
+    except ResourceLimitError:
+        meta_limit_caught = True
+    nox.test.assert_true(meta_limit_caught, "oversized ICC/EXIF metadata rejected by max_metadata_bytes")
+
+test_alpha_premultiplied_and_linear_blending()
+test_color_space_conversion_and_icc_gating()
+test_exif_gps_strip_cyclic_ifd_and_autorotate_roundtrip()
+print("color_metadata_test-ok")

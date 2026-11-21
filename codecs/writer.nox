@@ -1,0 +1,38 @@
+from nox.buffer import Buffer
+from codecs.bmp import encode_bmp
+from codecs.pgm import encode_pgm
+from codecs.png import encode_png
+from codecs.ppm import encode_ppm
+from codecs.sniff import ImageFormat, format_from_name
+from core.errors import CodecUnavailableError, UnsupportedFormatError
+from core.image import Image
+from core.options import EncodeOptions
+
+__all__: list[str] = ["encode_to_format", "encode_bytes"]
+
+def encode_to_format(img: Image, fmt: ImageFormat, opt: EncodeOptions) -> Buffer:
+    """Encode an Image into a Buffer using a typed ImageFormat target."""
+    match fmt:
+        case ImageFormat.PPM:
+            return encode_ppm(img, opt)
+        case ImageFormat.PGM:
+            return encode_pgm(img, opt)
+        case ImageFormat.BMP:
+            return encode_bmp(img, opt)
+        case ImageFormat.PNG:
+            return encode_png(img, opt)
+        case ImageFormat.GIF:
+            raise UnsupportedFormatError("GIF encoder lands in Phase F9")
+        case ImageFormat.JPEG:
+            raise CodecUnavailableError("JPEG encoder requires optional native JPEG adapter (Phase F8)")
+        case ImageFormat.WEBP:
+            raise CodecUnavailableError("WebP encoder requires optional native WebP adapter (Phase F8)")
+        case ImageFormat.TIFF:
+            raise CodecUnavailableError("TIFF encoder requires optional native TIFF adapter (Phase F8)")
+        case _:
+            raise UnsupportedFormatError("cannot encode to UNKNOWN image format")
+
+def encode_bytes(img: Image, format_name: str, opt: EncodeOptions) -> Buffer:
+    """Encode an Image into a Buffer for the requested format name ('PPM', 'PGM', 'BMP', 'PNG')."""
+    fmt: ImageFormat = format_from_name(format_name)
+    return encode_to_format(img, fmt, opt)

@@ -1,0 +1,51 @@
+from codecs.sniff import ImageFormat
+
+__all__: list[str] = ["CodecCapability", "list_codec_capabilities", "is_format_decode_supported", "is_format_encode_supported"]
+
+class CodecCapability:
+    """Describes the current build's support status for an image container format."""
+
+    format: ImageFormat
+    format_name: str
+    can_probe: bool
+    can_decode: bool
+    can_encode: bool
+    implementation: str
+
+    def __init__(self, format: ImageFormat, format_name: str, can_probe: bool, can_decode: bool, can_encode: bool, implementation: str) -> None:
+        self.format = format
+        self.format_name = format_name
+        self.can_probe = can_probe
+        self.can_decode = can_decode
+        self.can_encode = can_encode
+        self.implementation = implementation
+
+def list_codec_capabilities() -> list[CodecCapability]:
+    """Return the active codec capability table for the current Prism build."""
+    return [CodecCapability(ImageFormat.PPM, "PPM", True, True, True, "pure-nox (P6 8-bit RGB)"), CodecCapability(ImageFormat.PGM, "PGM", True, True, True, "pure-nox (P5 8-bit Gray)"), CodecCapability(ImageFormat.BMP, "BMP", True, True, True, "pure-nox (24/32-bit uncompressed BI_RGB)"), CodecCapability(ImageFormat.PNG, "PNG", True, True, True, "pure-nox (8-bit Gray/RGB/RGBA/Palette+tRNS, RFC 1950/1951)"), CodecCapability(ImageFormat.JPEG, "JPEG", False, False, False, "optional-native-f8 (unavailable)"), CodecCapability(ImageFormat.WEBP, "WEBP", False, False, False, "optional-native-f8 (unavailable)"), CodecCapability(ImageFormat.GIF, "GIF", False, False, False, "planned-f9 (animation)"), CodecCapability(ImageFormat.TIFF, "TIFF", False, False, False, "optional-native-f8 (unavailable)")]
+
+def is_format_decode_supported(fmt: ImageFormat) -> bool:
+    match fmt:
+        case ImageFormat.PPM:
+            return True
+        case ImageFormat.PGM:
+            return True
+        case ImageFormat.BMP:
+            return True
+        case ImageFormat.PNG:
+            return True
+        case _:
+            return False
+
+def is_format_encode_supported(fmt: ImageFormat) -> bool:
+    match fmt:
+        case ImageFormat.PPM:
+            return True
+        case ImageFormat.PGM:
+            return True
+        case ImageFormat.BMP:
+            return True
+        case ImageFormat.PNG:
+            return True
+        case _:
+            return False

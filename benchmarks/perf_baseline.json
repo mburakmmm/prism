@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-11-21",
+  "phase": "F0-F1 (v0.1.0)",
+  "environment": {
+    "os": "macOS arm64 (Apple Silicon)",
+    "compiler": "noxc 2.2.38",
+    "backends_verified": ["llvm", "qbe"]
+  },
+  "baselines": [
+    {
+      "scenario": "allocate_fill_64x64_rgba8_and_encode_decode_ppm",
+      "dimensions": "64x64",
+      "pixel_format": "RGBA8 -> PPM P6 RGB8",
+      "bytes_encoded": 12301,
+      "status": "verified",
+      "notes": "Baseline vertical slice from examples/create_checkerboard.nox"
+    },
+    {
+      "scenario": "random_1000_small_images_construct_crop_view",
+      "iterations": 1000,
+      "dimensions": "1x1..16x16",
+      "pixel_formats": ["RGBA8", "RGB8", "GRAY8"],
+      "status": "verified",
+      "notes": "Deterministic property suite in tests/unit/core_pixel_test.nox"
+    }
+  ]
+}

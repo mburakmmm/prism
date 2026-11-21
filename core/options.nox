@@ -1,0 +1,58 @@
+from core.errors import InvalidImageError
+from core.limits import ResourceLimits
+
+__all__: list[str] = ["DecodeOptions", "EncodeOptions"]
+
+class DecodeOptions:
+    """Typed options governing image probing and decoding."""
+
+    limits: ResourceLimits
+    autorotate: bool
+    strip_private_metadata: bool
+    assume_srgb: bool
+
+    def __init__(self, limits: ResourceLimits, autorotate: bool, strip_private_metadata: bool, assume_srgb: bool) -> None:
+        self.limits = limits
+        self.autorotate = autorotate
+        self.strip_private_metadata = strip_private_metadata
+        self.assume_srgb = assume_srgb
+
+    @staticmethod
+    def default() -> DecodeOptions:
+
+        return DecodeOptions(ResourceLimits.default(), True, True, True)
+
+    @staticmethod
+    def with_limits(lim: ResourceLimits) -> DecodeOptions:
+
+        return DecodeOptions(lim, True, True, True)
+
+class EncodeOptions:
+    """Typed options governing image encoding and file output."""
+
+    limits: ResourceLimits
+    quality: int
+    lossless: bool
+    strip_private_metadata: bool
+    overwrite: bool
+    atomic_write: bool
+
+    def __init__(self, limits: ResourceLimits, quality: int, lossless: bool, strip_private_metadata: bool, overwrite: bool, atomic_write: bool) -> None:
+        if quality < 1 or quality > 100:
+            raise InvalidImageError("EncodeOptions quality must be in range [1, 100]")
+        self.limits = limits
+        self.quality = quality
+        self.lossless = lossless
+        self.strip_private_metadata = strip_private_metadata
+        self.overwrite = overwrite
+        self.atomic_write = atomic_write
+
+    @staticmethod
+    def default() -> EncodeOptions:
+
+        return EncodeOptions(ResourceLimits.default(), 85, True, True, False, True)
+
+    @staticmethod
+    def overwrite_atomic() -> EncodeOptions:
+
+        return EncodeOptions(ResourceLimits.default(), 85, True, True, True, True)

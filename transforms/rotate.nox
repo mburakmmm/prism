@@ -1,0 +1,212 @@
+import nox.mathx
+from core.color import clamp_u8
+from core.errors import DimensionError, InvalidImageError
+from core.image import Image, MutableImage
+from core.pixel import Pixel
+from transforms.flip import flip_horizontal, flip_vertical, transpose, transverse
+from transforms.resample import ResampleFilter, require_finite_float
+
+__all__: list[str] = ["rotate90", "rotate180", "rotate270", "apply_exif_orientation", "normalize_orientation", "rotate_arbitrary"]
+
+def rotate90(img: Image) -> Image:
+    """Rotate an Image 90 degrees clockwise (exact fast path: dst(h-1-y, x) = src(x, y))."""
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(h, w, img.pixel_format(), Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        dst_x: int = h - 1 - y
+        x: int = 0
+        while x < w:
+            out_mut.set_pixel(dst_x, x, img.get_pixel(x, y))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def rotate180(img: Image) -> Image:
+    """Rotate an Image 180 degrees (exact fast path: dst(w-1-x, h-1-y) = src(x, y))."""
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, img.pixel_format(), Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        dst_y: int = h - 1 - y
+        x: int = 0
+        while x < w:
+            out_mut.set_pixel(w - 1 - x, dst_y, img.get_pixel(x, y))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def rotate270(img: Image) -> Image:
+    """Rotate an Image 270 degrees clockwise / 90 CCW (exact fast path: dst(y, w-1-x) = src(x, y))."""
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(h, w, img.pixel_format(), Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            out_mut.set_pixel(y, w - 1 - x, img.get_pixel(x, y))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res
+
+def apply_exif_orientation(img: Image, orientation: int) -> Image:
+    """Apply EXIF orientation 1..8 and reset returned Image's metadata.orientation to 1."""
+    if orientation < 1 or orientation > 8:
+        raise InvalidImageError("EXIF orientation must be in range [1, 8]: got " + str(orientation))
+    res: Image = img.clone()
+    if orientation == 2:
+        res = flip_horizontal(img)
+    elif orientation == 3:
+        res = rotate180(img)
+    elif orientation == 4:
+        res = flip_vertical(img)
+    elif orientation == 5:
+        res = transpose(img)
+    elif orientation == 6:
+        res = rotate90(img)
+    elif orientation == 7:
+        res = transverse(img)
+    elif orientation == 8:
+        res = rotate270(img)
+    res.metadata.orientation = 1
+    return res
+
+def normalize_orientation(img: Image) -> Image:
+    """Normalize an Image according to its attached metadata.orientation tag and reset it to 1."""
+    return apply_exif_orientation(img, img.metadata.orientation)
+
+def _sample_with_bg(img: Image, sx: float, sy: float, bg_px: Pixel, filter: ResampleFilter) -> Pixel:
+    w: int = img.width()
+    h: int = img.height()
+    if sx < -0.5 or sy < -0.5 or sx >= float(w) - 0.5 or sy >= float(h) - 0.5:
+        return bg_px
+
+    if filter == ResampleFilter.NEAREST:
+        nx: int = int(nox.mathx.floor(sx + 0.5))
+        ny: int = int(nox.mathx.floor(sy + 0.5))
+        if nx < 0 or nx >= w or ny < 0 or ny >= h:
+            return bg_px
+        return img.get_pixel(nx, ny)
+
+    # Alpha-safe bilinear interpolation with bg_px for out-of-bounds neighbors
+    x0: int = int(nox.mathx.floor(sx))
+    y0: int = int(nox.mathx.floor(sy))
+    fx: float = sx - float(x0)
+    fy: float = sy - float(y0)
+
+    sum_w: float = 0.0
+    sum_wa: float = 0.0
+    sum_r: float = 0.0
+    sum_g: float = 0.0
+    sum_b: float = 0.0
+
+    dy: int = 0
+    while dy <= 1:
+        wy: float = 1.0 - fy
+        if dy == 1:
+            wy = fy
+        iy: int = y0 + dy
+        dx: int = 0
+        while dx <= 1:
+            wx: float = 1.0 - fx
+            if dx == 1:
+                wx = fx
+            ix: int = x0 + dx
+            w_xy: float = wx * wy
+            px: Pixel = bg_px
+            if ix >= 0 and ix < w and iy >= 0 and iy < h:
+                px = img.get_pixel(ix, iy)
+            sum_w = sum_w + w_xy
+            a_norm: float = float(px.a) / 255.0
+            wa: float = w_xy * a_norm
+            sum_wa = sum_wa + wa
+            sum_r = sum_r + wa * float(px.r)
+            sum_g = sum_g + wa * float(px.g)
+            sum_b = sum_b + wa * float(px.b)
+            dx = dx + 1
+        dy = dy + 1
+
+    if sum_w <= 1.0e-9:
+        return bg_px
+    out_a: int = clamp_u8(int(sum_wa / sum_w * 255.0 + 0.5))
+    if out_a == 0 or sum_wa <= 1.0e-9:
+        return Pixel(bg_px.r, bg_px.g, bg_px.b, 0)
+    return Pixel(clamp_u8(int(sum_r / sum_wa + 0.5)), clamp_u8(int(sum_g / sum_wa + 0.5)), clamp_u8(int(sum_b / sum_wa + 0.5)), out_a)
+
+def rotate_arbitrary(img: Image, angle_deg: float, expand: bool, bg_px: Pixel, filter: ResampleFilter) -> Image:
+    """Rotate an Image clockwise by angle_deg around its center, with fast-paths for 90-degree multiples."""
+    require_finite_float(angle_deg, "angle_deg")
+
+    # Normalize angle into [0.0, 360.0)
+    norm_deg: float = angle_deg % 360.0
+    if norm_deg < 0.0:
+        norm_deg = norm_deg + 360.0
+
+    if nox.mathx.abs(norm_deg - 0.0) < 1.0e-6 or nox.mathx.abs(norm_deg - 360.0) < 1.0e-6:
+        return img.clone()
+    if nox.mathx.abs(norm_deg - 90.0) < 1.0e-6:
+        return rotate90(img)
+    if nox.mathx.abs(norm_deg - 180.0) < 1.0e-6:
+        return rotate180(img)
+    if nox.mathx.abs(norm_deg - 270.0) < 1.0e-6:
+        return rotate270(img)
+
+    w: int = img.width()
+    h: int = img.height()
+    rad: float = norm_deg * (nox.mathx.pi() / 180.0)
+    cos_a: float = nox.mathx.cos(rad)
+    sin_a: float = nox.mathx.sin(rad)
+
+    out_w: int = w
+    out_h: int = h
+    if expand:
+        abs_cos: float = nox.mathx.abs(cos_a)
+        abs_sin: float = nox.mathx.abs(sin_a)
+        out_w = int(nox.mathx.ceil(float(w) * abs_cos + float(h) * abs_sin))
+        out_h = int(nox.mathx.ceil(float(w) * abs_sin + float(h) * abs_cos))
+        if out_w < 1:
+            out_w = 1
+        if out_h < 1:
+            out_h = 1
+
+    img.limits.validate_dimensions(out_w, out_h, img.bytes_per_pixel())
+    out_mut: MutableImage = MutableImage.create(out_w, out_h, img.pixel_format(), bg_px, img.limits)
+
+    src_cx: float = (float(w) - 1.0) * 0.5
+    src_cy: float = (float(h) - 1.0) * 0.5
+    dst_cx: float = (float(out_w) - 1.0) * 0.5
+    dst_cy: float = (float(out_h) - 1.0) * 0.5
+
+    dy: int = 0
+    while dy < out_h:
+        ry: float = float(dy) - dst_cy
+        dx: int = 0
+        while dx < out_w:
+            rx: float = float(dx) - dst_cx
+            sx: float = rx * cos_a + ry * sin_a + src_cx
+            sy: float = -rx * sin_a + ry * cos_a + src_cy
+            px: Pixel = _sample_with_bg(img, sx, sy, bg_px, filter)
+            out_mut.set_pixel(dx, dy, px)
+            dx = dx + 1
+        dy = dy + 1
+
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.alpha_mode = img.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res

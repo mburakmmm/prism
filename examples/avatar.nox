@@ -1,0 +1,57 @@
+import nox.fs
+import nox.os
+import nox.path
+from prism import DecodeOptions, EncodeOptions, Image, ImageInfo, MutableImage, Pixel, PixelFormat, ResampleFilter, ResourceLimits, open_image, probe_file, resize_image, save_image
+
+lim: ResourceLimits = ResourceLimits.default()
+size: int = 64
+canvas: MutableImage = MutableImage.create(size, size, PixelFormat.RGBA8, Pixel.transparent(), lim)
+
+cx: int = size // 2
+cy: int = size // 2
+rad_sq: int = 28 * 28
+inner_sq: int = 16 * 16
+
+y: int = 0
+while y < size:
+    dy: int = y - cy
+    x: int = 0
+    while x < size:
+        dx: int = x - cx
+        dist_sq: int = dx * dx + dy * dy
+        if dist_sq <= inner_sq:
+            canvas.set_pixel(x, y, Pixel.rgba(255, 255, 255, 255))
+        elif dist_sq <= rad_sq:
+            canvas.set_pixel(x, y, Pixel.rgba(59, 130, 246, 255))
+        x = x + 1
+    y = y + 1
+
+avatar_64: Image = canvas.to_image()
+avatar_32: Image = resize_image(avatar_64, 32, 32, ResampleFilter.LANCZOS3)
+
+fix_dir: str = nox.path.join(nox.os.current_dir(), "tests/fixtures")
+nox.fs.create_dir_all(fix_dir)
+fix_png_path: str = nox.path.join(fix_dir, "rgba_4x4.png")
+
+fix_mut: MutableImage = MutableImage.create(4, 4, PixelFormat.RGBA8, Pixel.transparent(), lim)
+fy: int = 0
+while fy < 4:
+    fx: int = 0
+    while fx < 4:
+        fix_mut.set_pixel(fx, fy, Pixel.rgba(fx * 64, fy * 64, (fx + fy) * 32, (fx * 4 + fy) * 17))
+        fx = fx + 1
+    fy = fy + 1
+fix_png_img: Image = fix_mut.to_image()
+save_image(fix_png_img, fix_png_path, EncodeOptions.overwrite_atomic())
+fix_info: ImageInfo = probe_file(fix_png_path, DecodeOptions.default())
+assert fix_info.format_name == "PNG" and fix_info.channels() == 4, "4x4 PNG fixture probe"
+loaded_fix: Image = open_image(fix_png_path, DecodeOptions.default())
+assert loaded_fix.pixel_equals(fix_png_img), "4x4 PNG fixture pixel round-trip"
+
+out_avatar: str = nox.path.join(nox.os.current_dir(), "examples/avatar_demo.png")
+save_image(avatar_32, out_avatar, EncodeOptions.overwrite_atomic())
+reloaded: Image = open_image(out_avatar, DecodeOptions.default())
+assert reloaded.pixel_equals(avatar_32), "avatar PNG round-trip mismatch"
+nox.fs.remove_file(out_avatar)
+
+print("avatar-png-ok", reloaded.width(), reloaded.height(), fix_info.width, fix_info.height)

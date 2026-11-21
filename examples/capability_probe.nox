@@ -1,0 +1,175 @@
+import nox.bytes
+import nox.fs
+import nox.os
+import nox.path
+import nox.strings
+from nox.binary import BinaryReader, BinaryWriter, span_reader
+from nox.buffer import Buffer, Span
+from nox.path import PathError
+from core.errors import DimensionError, ResourceLimitError
+from core.image import Image, ImageView, MutableImage, new_image
+from core.limits import ResourceLimits, checked_add, checked_mul, checked_sub
+from core.pixel import Pixel, PixelFormat
+
+extern def memset(p: ptr, c: int, n: int) -> ptr from "c"
+
+def probe_buffers() -> None:
+    buf_16m: Buffer = Buffer(16777216)
+    buf_16m.set(0, u8(42))
+    buf_16m.set(16777215, u8(251))
+    assert int(buf_16m.get(0)) == 42, "16 MiB buffer start byte mismatch"
+    assert int(buf_16m.get(16777215)) == 251, "16 MiB buffer end byte mismatch"
+
+    sp: Span = buf_16m.span(0, 16)
+    assert sp.len() == 16, "span length mismatch"
+    assert int(sp.get(0)) == 42, "span byte 0 mismatch"
+    sp.set(1, u8(99))
+    assert int(buf_16m.get(1)) == 99, "span write propagation failed"
+
+    oob_caught: bool = False
+    try:
+        buf_16m.get(16777216)
+    except IndexError:
+        oob_caught = True
+    assert oob_caught, "Buffer out-of-bounds read must raise IndexError"
+
+    buf_64m: Buffer = Buffer(67108864)
+    buf_64m.set(67108863, u8(128))
+    assert int(buf_64m.get(67108863)) == 128, "64 MiB buffer end byte mismatch"
+
+def probe_binary_and_bytes_roundtrip() -> None:
+    raw_ints: list[int] = [137, 80, 78, 71, 13, 10, 26, 10, 0, 255, 216, 254, 0, 1]
+    raw_str: str = nox.bytes.str_from_list(raw_ints)
+    assert nox.strings.byte_len(raw_str) == 14, "binary str byte_len mismatch"
+    buf: Buffer = nox.bytes.from_str(raw_str)
+    assert buf.len() == 14, "Buffer from binary str length mismatch"
+    assert int(buf.get(0)) == 137, "PNG 0x89 byte mismatch"
+    assert int(buf.get(8)) == 0, "embedded NUL byte mismatch"
+    assert int(buf.get(9)) == 255, "invalid UTF-8 0xFF byte mismatch"
+    back_str: str = nox.bytes.to_str(buf)
+    back_list: list[int] = nox.bytes.list_from_str(back_str)
+    assert len(back_list) == 14, "roundtrip list length mismatch"
+    assert back_list[0] == 137 and back_list[8] == 0 and back_list[9] == 255, "roundtrip content mismatch"
+
+    bin_buf: Buffer = Buffer(16)
+    writer: BinaryWriter = BinaryWriter(bin_buf)
+    writer.write_u8(u8(137))
+    writer.write_u16_be(u16(4660))
+    writer.write_u32_le(u32(3735928559))
+    writer.write_u64_be(u64(72623859790382856))
+
+    reader: BinaryReader = BinaryReader(bin_buf)
+    assert int(reader.read_u8()) == 137, "BinaryReader u8 mismatch"
+    assert int(reader.read_u16_be()) == 4660, "BinaryReader u16_be mismatch"
+    assert int(reader.read_u32_le()) == 3735928559, "BinaryReader u32_le mismatch"
+    assert int(reader.read_u64_be()) == 72623859790382856, "BinaryReader u64_be mismatch"
+
+    sub_span: Span = bin_buf.span(1, 3)
+    sub_reader: BinaryReader = span_reader(sub_span)
+    assert int(sub_reader.read_u16_be()) == 4660, "span_reader u16_be mismatch"
+
+def probe_checked_arithmetic() -> None:
+    assert checked_add(1024, 2048) == 3072, "checked_add valid case failed"
+    assert checked_sub(5000, 1200) == 3800, "checked_sub valid case failed"
+    assert checked_mul(1920, 1080) == 2073600, "checked_mul valid case failed"
+
+    overflow_mul: bool = False
+    try:
+        checked_mul(4000000000, 4000000000)
+    except ResourceLimitError:
+        overflow_mul = True
+    assert overflow_mul, "checked_mul must reject 64-bit multiplication overflow"
+
+    overflow_add: bool = False
+    try:
+        checked_add(9223372036854775800, 100)
+    except ResourceLimitError:
+        overflow_add = True
+    assert overflow_add, "checked_add must reject 64-bit addition overflow"
+
+    neg_err: bool = False
+    try:
+        checked_mul(-5, 10)
+    except DimensionError:
+        neg_err = True
+    assert neg_err, "checked_mul must reject negative operands"
+
+def probe_fs_and_safe_join() -> None:
+    cwd: str = nox.os.current_dir()
+    safe_path: str = nox.path.safe_join(cwd, "examples/probe_chunked.tmp")
+    traversal_blocked: bool = False
+    try:
+        nox.path.safe_join(cwd, "../../etc/passwd")
+    except PathError:
+        traversal_blocked = True
+    assert traversal_blocked, "safe_join must block '../' path traversal"
+
+    chunk_payload: str = nox.bytes.str_from_list([0, 127, 128, 255, 1, 2, 3, 4])
+    with nox.fs.open_write(safe_path) as writer:
+        i: int = 0
+        while i < 128:
+            writer.write(chunk_payload)
+            i = i + 1
+
+    total_read: int = 0
+    with nox.fs.open_read(safe_path) as reader:
+        while True:
+            part: str = reader.read_chunk(256)
+            part_len: int = nox.strings.byte_len(part)
+            if part_len == 0:
+                break
+            total_read = total_read + part_len
+    nox.fs.remove_file(safe_path)
+    assert total_read == 1024, "chunked binary I/O byte count mismatch"
+
+async def compute_tile_checksum(tile_id: int, w: int, h: int) -> int:
+    acc: int = 0
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            acc = acc + tile_id * 1000 + (y * w + x)
+            x = x + 1
+        y = y + 1
+    return acc
+
+async def run_parallel_tiles() -> list[int]:
+    t0: Task[int] = spawn compute_tile_checksum(0, 16, 16)
+    t1: Task[int] = spawn compute_tile_checksum(1, 16, 16)
+    t2: Task[int] = spawn compute_tile_checksum(2, 16, 16)
+    t3: Task[int] = spawn compute_tile_checksum(3, 16, 16)
+    r0: int = await t0
+    r1: int = await t1
+    r2: int = await t2
+    r3: int = await t3
+    return [r0, r1, r2, r3]
+
+def probe_ffi_and_ptr_of() -> None:
+    packed_bytes: list[u8] = [u8(0), u8(0), u8(0), u8(0), u8(0), u8(0), u8(0), u8(0)]
+    lowlevel:
+        memset(ptr_from_int(ptr_to_int(ptr_of(packed_bytes))), 202, 8)
+    assert int(packed_bytes[0]) == 202 and int(packed_bytes[7]) == 202, "ptr_of + C memset failed"
+
+def probe_image_core() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+    mut_img: MutableImage = MutableImage.create(32, 32, PixelFormat.RGBA8, Pixel.rgba(10, 20, 30, 255), lim)
+    mut_img.set_pixel(15, 15, Pixel.rgba(200, 100, 50, 128))
+    img: Image = mut_img.to_image()
+    view: ImageView = img.crop_view(8, 8, 16, 16)
+    assert view.get_pixel(7, 7).equals(Pixel.rgba(200, 100, 50, 128)), "ImageView center pixel mismatch"
+    base_1x1: Image = new_image(1, 1, Pixel.rgba(1, 2, 3, 255))
+    assert base_1x1.get_pixel(0, 0).equals(Pixel.rgba(1, 2, 3, 255)), "1x1 image pixel mismatch"
+
+probe_buffers()
+probe_binary_and_bytes_roundtrip()
+probe_checked_arithmetic()
+probe_fs_and_safe_join()
+tile_task: Task[list[int]] = spawn run_parallel_tiles()
+tile_results: list[int] = await tile_task
+assert tile_results[0] == 32640, "tile 0 checksum mismatch"
+assert tile_results[1] == 288640, "tile 1 checksum mismatch"
+assert tile_results[2] == 544640, "tile 2 checksum mismatch"
+assert tile_results[3] == 800640, "tile 3 checksum mismatch"
+probe_ffi_and_ptr_of()
+probe_image_core()
+print("capability-probe-ok", len(tile_results), tile_results[0], tile_results[3])

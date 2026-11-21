@@ -1,0 +1,136 @@
+import nox.strings
+from nox.buffer import Buffer
+from core.errors import CorruptDataError, UnsupportedFormatError
+
+__all__: list[str] = ["ImageFormat", "sniff_format", "format_from_name", "format_from_extension"]
+
+enum ImageFormat:
+    PPM
+    PGM
+    BMP
+    PNG
+    JPEG
+    WEBP
+    GIF
+    TIFF
+    UNKNOWN
+
+    def name(self) -> str:
+        match self:
+            case ImageFormat.PPM:
+                return "PPM"
+            case ImageFormat.PGM:
+                return "PGM"
+            case ImageFormat.BMP:
+                return "BMP"
+            case ImageFormat.PNG:
+                return "PNG"
+            case ImageFormat.JPEG:
+                return "JPEG"
+            case ImageFormat.WEBP:
+                return "WEBP"
+            case ImageFormat.GIF:
+                return "GIF"
+            case ImageFormat.TIFF:
+                return "TIFF"
+            case ImageFormat.UNKNOWN:
+                return "UNKNOWN"
+
+def _is_netpbm_sep(b: int) -> bool:
+    return b == 32 or b == 9 or b == 10 or b == 13 or b == 35
+
+def sniff_format(data: Buffer) -> ImageFormat:
+    """Detect image container format strictly from magic bytes (never from filename)."""
+    n: int = data.len()
+    if n < 2:
+        return ImageFormat.UNKNOWN
+
+    b0: int = int(data.get(0))
+    b1: int = int(data.get(1))
+
+    # Netpbm P5 (PGM binary) / P6 (PPM binary) / P2 / P3
+    if b0 == 80 and n >= 3:
+        b2: int = int(data.get(2))
+        if _is_netpbm_sep(b2):
+            if b1 == 54:
+                return ImageFormat.PPM
+            if b1 == 53:
+                return ImageFormat.PGM
+            if b1 == 51:
+                raise UnsupportedFormatError("ASCII PPM P3 is recognized but unsupported; use binary P6")
+            if b1 == 50:
+                raise UnsupportedFormatError("ASCII PGM P2 is recognized but unsupported; use binary P5")
+
+    # BMP: "BM" (0x42, 0x4D)
+    if b0 == 66 and b1 == 77:
+        return ImageFormat.BMP
+
+    # PNG: 89 50 4E 47 0D 0A 1A 0A
+    if n >= 8:
+        if b0 == 137 and b1 == 80 and int(data.get(2)) == 78 and int(data.get(3)) == 71 and int(data.get(4)) == 13 and int(data.get(5)) == 10 and int(data.get(6)) == 26 and int(data.get(7)) == 10:
+            return ImageFormat.PNG
+
+    # JPEG: FF D8 FF
+    if n >= 3 and b0 == 255 and b1 == 216 and int(data.get(2)) == 255:
+        return ImageFormat.JPEG
+
+    # GIF: "GIF87a" or "GIF89a"
+    if n >= 6:
+        if b0 == 71 and b1 == 73 and int(data.get(2)) == 70 and int(data.get(3)) == 56 and (int(data.get(4)) == 55 or int(data.get(4)) == 57) and int(data.get(5)) == 97:
+            return ImageFormat.GIF
+
+    # WebP: "RIFF" .... "WEBP"
+    if n >= 12:
+        if b0 == 82 and b1 == 73 and int(data.get(2)) == 70 and int(data.get(3)) == 70 and int(data.get(8)) == 87 and int(data.get(9)) == 69 and int(data.get(10)) == 66 and int(data.get(11)) == 80:
+            return ImageFormat.WEBP
+
+    # TIFF: "II*\0" (49 49 2A 00) or "MM\0*" (4D 4D 00 2A)
+    if n >= 4:
+        b2_t: int = int(data.get(2))
+        b3_t: int = int(data.get(3))
+        if b0 == 73 and b1 == 73 and b2_t == 42 and b3_t == 0 or b0 == 77 and b1 == 77 and b2_t == 0 and b3_t == 42:
+            return ImageFormat.TIFF
+
+    return ImageFormat.UNKNOWN
+
+def format_from_name(format_name: str) -> ImageFormat:
+    """Resolve an explicit format name string into an ImageFormat enum."""
+    norm: str = nox.strings.upper(nox.strings.trim(format_name))
+    if norm == "PPM" or norm == "P6":
+        return ImageFormat.PPM
+    if norm == "PGM" or norm == "P5":
+        return ImageFormat.PGM
+    if norm == "BMP":
+        return ImageFormat.BMP
+    if norm == "PNG":
+        return ImageFormat.PNG
+    if norm == "JPG" or norm == "JPEG":
+        return ImageFormat.JPEG
+    if norm == "WEBP":
+        return ImageFormat.WEBP
+    if norm == "GIF":
+        return ImageFormat.GIF
+    if norm == "TIF" or norm == "TIFF":
+        return ImageFormat.TIFF
+    raise UnsupportedFormatError("unknown or unsupported target image format: " + format_name)
+
+def format_from_extension(path: str) -> ImageFormat:
+    """Infer target encoder format from an output file path extension."""
+    lower_p: str = nox.strings.lower(nox.strings.trim(path))
+    if nox.strings.ends_with(lower_p, ".ppm"):
+        return ImageFormat.PPM
+    if nox.strings.ends_with(lower_p, ".pgm"):
+        return ImageFormat.PGM
+    if nox.strings.ends_with(lower_p, ".bmp"):
+        return ImageFormat.BMP
+    if nox.strings.ends_with(lower_p, ".png"):
+        return ImageFormat.PNG
+    if nox.strings.ends_with(lower_p, ".jpg") or nox.strings.ends_with(lower_p, ".jpeg"):
+        return ImageFormat.JPEG
+    if nox.strings.ends_with(lower_p, ".webp"):
+        return ImageFormat.WEBP
+    if nox.strings.ends_with(lower_p, ".gif"):
+        return ImageFormat.GIF
+    if nox.strings.ends_with(lower_p, ".tif") or nox.strings.ends_with(lower_p, ".tiff"):
+        return ImageFormat.TIFF
+    raise CorruptDataError("cannot determine output image format from file extension: " + path)

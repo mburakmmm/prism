@@ -1,0 +1,20 @@
+name: Feature Request
+description: Propose a new image codec, filter, transform, or ecosystem integration for Prism
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Problem or Use Case
+      description: Which Prism phase (`F0`–`F16`) or application workflow does this relate to?
+    validations:
+      required: true
+  - type: textarea
+    id: api_design
+    attributes:
+      label: Proposed Statically Typed Nox API
+      description: Sketch the proposed types, function signatures, and `ResourceLimits` behavior.
+      render: python
+    validations:
+      required: true

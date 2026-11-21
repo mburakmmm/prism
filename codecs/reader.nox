@@ -1,0 +1,63 @@
+from nox.buffer import Buffer
+from codecs.bmp import decode_bmp, probe_bmp
+from codecs.pgm import decode_pgm, probe_pgm
+from codecs.png import decode_png, probe_png
+from codecs.ppm import decode_ppm, probe_ppm
+from codecs.sniff import ImageFormat, sniff_format
+from core.errors import CodecUnavailableError, CorruptDataError, UnsupportedFormatError
+from core.image import Image
+from core.metadata import ImageInfo
+from core.options import DecodeOptions
+
+__all__: list[str] = ["probe_bytes", "decode_bytes"]
+
+def _raise_for_unhandled_format(fmt: ImageFormat) -> None:
+    match fmt:
+        case ImageFormat.GIF:
+            raise UnsupportedFormatError("GIF format detected; GIF engine lands in Phase F9")
+        case ImageFormat.JPEG:
+            raise CodecUnavailableError("JPEG format detected but optional native JPEG adapter is not enabled in this build")
+        case ImageFormat.WEBP:
+            raise CodecUnavailableError("WebP format detected but optional native WebP adapter is not enabled in this build")
+        case ImageFormat.TIFF:
+            raise CodecUnavailableError("TIFF format detected but optional native TIFF adapter is not enabled in this build")
+        case _:
+            raise CorruptDataError("unrecognized or corrupt image magic header")
+
+def probe_bytes(data: Buffer, opt: DecodeOptions) -> ImageInfo:
+    """Sniff format magic bytes and probe image header without decoding full pixels."""
+    opt.limits.validate_input_size(data.len())
+    if data.len() == 0:
+        raise CorruptDataError("cannot probe empty image buffer")
+    fmt: ImageFormat = sniff_format(data)
+    match fmt:
+        case ImageFormat.PPM:
+            return probe_ppm(data, opt)
+        case ImageFormat.PGM:
+            return probe_pgm(data, opt)
+        case ImageFormat.BMP:
+            return probe_bmp(data, opt)
+        case ImageFormat.PNG:
+            return probe_png(data, opt)
+        case _:
+            _raise_for_unhandled_format(fmt)
+            return probe_ppm(data, opt)
+
+def decode_bytes(data: Buffer, opt: DecodeOptions) -> Image:
+    """Sniff format magic bytes and decode an image Buffer using the matching codec."""
+    opt.limits.validate_input_size(data.len())
+    if data.len() == 0:
+        raise CorruptDataError("cannot decode empty image buffer")
+    fmt: ImageFormat = sniff_format(data)
+    match fmt:
+        case ImageFormat.PPM:
+            return decode_ppm(data, opt)
+        case ImageFormat.PGM:
+            return decode_pgm(data, opt)
+        case ImageFormat.BMP:
+            return decode_bmp(data, opt)
+        case ImageFormat.PNG:
+            return decode_png(data, opt)
+        case _:
+            _raise_for_unhandled_format(fmt)
+            return decode_ppm(data, opt)

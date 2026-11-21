@@ -1,0 +1,20 @@
+from nox.buffer import Buffer
+from codecs.reader import decode_bytes, probe_bytes
+from codecs.writer import encode_bytes
+from core.image import Image
+from core.metadata import ImageInfo
+from core.options import DecodeOptions, EncodeOptions
+
+__all__: list[str] = ["probe", "decode", "encode"]
+
+def probe(data: Buffer, opt: DecodeOptions) -> ImageInfo:
+    """Probe an in-memory image Buffer without decoding the full pixel payload."""
+    return probe_bytes(data, opt)
+
+def decode(data: Buffer, opt: DecodeOptions) -> Image:
+    """Decode an in-memory image Buffer by sniffing its magic bytes."""
+    return decode_bytes(data, opt)
+
+def encode(img: Image, format_name: str, opt: EncodeOptions) -> Buffer:
+    """Encode an Image into an in-memory Buffer in the specified format."""
+    return encode_bytes(img, format_name, opt)

@@ -1,0 +1,31 @@
+import nox.fs
+import nox.os
+import nox.path
+from prism import EncodeOptions, Image, MutableImage, Pixel, PixelFormat, ResampleFilter, ResizeOptions, ResourceLimits, flip_horizontal, pad_image, resize_with_options, rotate90, save_image, thumbnail
+
+lim: ResourceLimits = ResourceLimits.default()
+banner: MutableImage = MutableImage.create(120, 60, PixelFormat.RGBA8, Pixel.rgba(15, 23, 42, 255), lim)
+banner.fill_rect(10, 10, 100, 40, Pixel.rgba(56, 189, 248, 255))
+banner.fill_rect(40, 20, 40, 20, Pixel.rgba(244, 63, 94, 255))
+src_img: Image = banner.to_image()
+
+thumb_inside: Image = thumbnail(src_img, 40, 40, ResampleFilter.LANCZOS3)
+assert thumb_inside.width() == 40 and thumb_inside.height() == 20, "thumbnail 40x20 aspect ratio"
+
+square_contain: Image = resize_with_options(src_img, 48, 48, ResizeOptions.fit_contain(ResampleFilter.BICUBIC, Pixel.rgba(255, 255, 255, 255)))
+assert square_contain.width() == 48 and square_contain.height() == 48, "contain 48x48"
+
+square_cover: Image = resize_with_options(src_img, 48, 48, ResizeOptions.fit_cover(ResampleFilter.BILINEAR))
+assert square_cover.width() == 48 and square_cover.height() == 48, "cover 48x48"
+
+rotated: Image = rotate90(flip_horizontal(thumb_inside))
+assert rotated.width() == 20 and rotated.height() == 40, "rotate90 dimensions swapped"
+
+framed: Image = pad_image(square_cover, 2, 2, 2, 2, Pixel.rgba(250, 204, 21, 255))
+assert framed.width() == 52 and framed.height() == 52, "framed 52x52"
+
+out_bmp: str = nox.path.join(nox.os.current_dir(), "examples/thumb_demo.bmp")
+save_image(framed, out_bmp, EncodeOptions.overwrite_atomic())
+nox.fs.remove_file(out_bmp)
+
+print("thumbnails-example-ok", thumb_inside.width(), thumb_inside.height(), framed.width(), framed.height())

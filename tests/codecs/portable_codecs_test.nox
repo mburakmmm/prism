@@ -1,0 +1,226 @@
+import nox.bytes
+import nox.fs
+import nox.os
+import nox.path
+import nox.test
+from nox.binary import BinaryWriter
+from nox.buffer import Buffer
+from prism import CodecCapability, CodecUnavailableError, CorruptDataError, DecodeOptions, DimensionError, EncodeOptions, Image, ImageFormat, ImageIOError, ImageInfo, MutableImage, Pixel, PixelFormat, ResourceLimitError, ResourceLimits, UnsupportedFormatError, UnsupportedPixelFormatError, decode, decode_bmp, encode, encode_bmp, list_codec_capabilities, new_image, open_image, open_image_confined, probe, probe_bmp, probe_file, save_image, save_image_as, save_image_confined, sniff_format
+
+def test_magic_byte_sniffing() -> None:
+    ppm_buf: Buffer = nox.bytes.from_str("P6\n2 2\n255\n")
+    pgm_buf: Buffer = nox.bytes.from_str("P5\n2 2\n255\n")
+    bmp_buf: Buffer = nox.bytes.from_list([66, 77, 54, 0, 0, 0])
+    png_buf: Buffer = nox.bytes.from_list([137, 80, 78, 71, 13, 10, 26, 10])
+    jpg_buf: Buffer = nox.bytes.from_list([255, 216, 255, 224])
+    gif_buf: Buffer = nox.bytes.from_str("GIF89a")
+    webp_buf: Buffer = nox.bytes.from_str("RIFF\x00\x00\x00\x00WEBP")
+    tiff_le: Buffer = nox.bytes.from_list([73, 73, 42, 0])
+    tiff_be: Buffer = nox.bytes.from_list([77, 77, 0, 42])
+
+    nox.test.assert_true(sniff_format(ppm_buf) == ImageFormat.PPM, "sniff PPM P6")
+    nox.test.assert_true(sniff_format(pgm_buf) == ImageFormat.PGM, "sniff PGM P5")
+    nox.test.assert_true(sniff_format(bmp_buf) == ImageFormat.BMP, "sniff BMP")
+    nox.test.assert_true(sniff_format(png_buf) == ImageFormat.PNG, "sniff PNG")
+    nox.test.assert_true(sniff_format(jpg_buf) == ImageFormat.JPEG, "sniff JPEG")
+    nox.test.assert_true(sniff_format(gif_buf) == ImageFormat.GIF, "sniff GIF")
+    nox.test.assert_true(sniff_format(webp_buf) == ImageFormat.WEBP, "sniff WebP")
+    nox.test.assert_true(sniff_format(tiff_le) == ImageFormat.TIFF, "sniff TIFF LE")
+    nox.test.assert_true(sniff_format(tiff_be) == ImageFormat.TIFF, "sniff TIFF BE")
+
+    # JPEG and WebP raise CodecUnavailableError when native adapter is absent
+    jpg_unavail: bool = False
+    try:
+        decode(jpg_buf, DecodeOptions.default())
+    except CodecUnavailableError:
+        jpg_unavail = True
+    nox.test.assert_true(jpg_unavail, "JPEG raises CodecUnavailableError without native adapter")
+
+    webp_unavail: bool = False
+    try:
+        probe(webp_buf, DecodeOptions.default())
+    except CodecUnavailableError:
+        webp_unavail = True
+    nox.test.assert_true(webp_unavail, "WebP raises CodecUnavailableError without native adapter")
+
+def test_bmp_24bit_and_32bit_roundtrips() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+
+    # Odd dimensions (3x3, 5x7) exercise 4-byte row padding in 24-bit BMP
+    widths: list[int] = [1, 2, 3, 4, 5, 7]
+    heights: list[int] = [1, 3, 2, 4, 7, 5]
+    idx: int = 0
+    while idx < len(widths):
+        w: int = widths[idx]
+        h: int = heights[idx]
+        mut_rgb: MutableImage = MutableImage.create(w, h, PixelFormat.RGB8, Pixel.black(), lim)
+        y: int = 0
+        while y < h:
+            x: int = 0
+            while x < w:
+                mut_rgb.set_pixel(x, y, Pixel.rgb(x * 37 + y * 13 & 255, x * 73 + y * 59 & 255, x * 19 + y * 97 & 255))
+                x = x + 1
+            y = y + 1
+        src_rgb: Image = mut_rgb.to_image()
+        bmp_bytes: Buffer = encode_bmp(src_rgb, EncodeOptions.default())
+        info: ImageInfo = probe_bmp(bmp_bytes, DecodeOptions.default())
+        nox.test.assert_eq_int(info.width, w, "BMP 24-bit probe width")
+        nox.test.assert_eq_int(info.height, h, "BMP 24-bit probe height")
+        nox.test.assert_eq_int(info.channels(), 3, "BMP 24-bit probe channels")
+
+        dec_rgb: Image = decode(bmp_bytes, DecodeOptions.default())
+        nox.test.assert_true(dec_rgb.pixel_equals(src_rgb), "BMP 24-bit lossless roundtrip " + str(w) + "x" + str(h))
+        idx = idx + 1
+
+    # 32-bit RGBA8 BMP round-trip with straight alpha (0, 64, 128, 255)
+    mut_rgba: MutableImage = MutableImage.create(5, 3, PixelFormat.RGBA8, Pixel.transparent(), lim)
+    ay: int = 0
+    while ay < 3:
+        ax: int = 0
+        while ax < 5:
+            mut_rgba.set_pixel(ax, ay, Pixel.rgba(ax * 50 & 255, ay * 80 & 255, (ax + ay) * 40 & 255, ax * 63 & 255))
+            ax = ax + 1
+        ay = ay + 1
+    src_rgba: Image = mut_rgba.to_image()
+    bmp32_bytes: Buffer = encode(src_rgba, "BMP", EncodeOptions.default())
+    info32: ImageInfo = probe(bmp32_bytes, DecodeOptions.default())
+    nox.test.assert_eq_int(info32.channels(), 4, "BMP 32-bit probe channels")
+    dec_rgba: Image = decode_bmp(bmp32_bytes, DecodeOptions.default())
+    nox.test.assert_true(dec_rgba.pixel_equals(src_rgba), "BMP 32-bit RGBA8 lossless roundtrip")
+
+def test_bmp_top_down_and_negative_cases() -> None:
+    # Construct a valid 2x2 24-bit top-down BMP (height = -2)
+    # Row stride for width=2, 24-bit (6 bytes) -> padded to 8 bytes; total size = 54 + 16 = 70
+    td_buf: Buffer = Buffer(70)
+    w: BinaryWriter = BinaryWriter(td_buf)
+    w.write_u8(u8(66))
+    w.write_u8(u8(77))
+    w.write_u32_le(u32(70))
+    w.write_u16_le(u16(0))
+    w.write_u16_le(u16(0))
+    w.write_u32_le(u32(54))
+    w.write_u32_le(u32(40))
+    w.write_i32_le(i32(2))
+    w.write_i32_le(i32(-2))
+    w.write_u16_le(u16(1))
+    w.write_u16_le(u16(24))
+    w.write_u32_le(u32(0))
+    w.write_u32_le(u32(16))
+    w.write_i32_le(i32(2835))
+    w.write_i32_le(i32(2835))
+    w.write_u32_le(u32(0))
+    w.write_u32_le(u32(0))
+    # Row 0 (top row in top-down BMP): pixel (0,0) = Red (BGR: 0, 0, 255), pixel (1,0) = Green (0, 255, 0)
+    td_buf.set(54, u8(0))
+    td_buf.set(55, u8(0))
+    td_buf.set(56, u8(255))
+    td_buf.set(57, u8(0))
+    td_buf.set(58, u8(255))
+    td_buf.set(59, u8(0))
+    # Row 1 (bottom row): pixel (0,1) = Blue (255, 0, 0), pixel (1,1) = White (255, 255, 255)
+    td_buf.set(62, u8(255))
+    td_buf.set(63, u8(0))
+    td_buf.set(64, u8(0))
+    td_buf.set(65, u8(255))
+    td_buf.set(66, u8(255))
+    td_buf.set(67, u8(255))
+
+    td_img: Image = decode_bmp(td_buf, DecodeOptions.default())
+    nox.test.assert_eq_int(td_img.width(), 2, "top-down BMP width")
+    nox.test.assert_eq_int(td_img.height(), 2, "top-down BMP height")
+    nox.test.assert_true(td_img.get_pixel(0, 0).equals(Pixel.rgb(255, 0, 0)), "top-down (0,0) red")
+    nox.test.assert_true(td_img.get_pixel(1, 0).equals(Pixel.rgb(0, 255, 0)), "top-down (1,0) green")
+    nox.test.assert_true(td_img.get_pixel(0, 1).equals(Pixel.rgb(0, 0, 255)), "top-down (0,1) blue")
+    nox.test.assert_true(td_img.get_pixel(1, 1).equals(Pixel.rgb(255, 255, 255)), "top-down (1,1) white")
+
+    # RLE8 compression (compression = 1) must raise UnsupportedFormatError
+    rle_buf: Buffer = Buffer(70)
+    rle_buf.copy_from(td_buf)
+    rle_buf.set(30, u8(1))
+    rle_caught: bool = False
+    try:
+        decode_bmp(rle_buf, DecodeOptions.default())
+    except UnsupportedFormatError:
+        rle_caught = True
+    nox.test.assert_true(rle_caught, "RLE BMP raises UnsupportedFormatError")
+
+    # 8-bit paletted BMP (bit_count = 8) must raise UnsupportedPixelFormatError
+    pal_buf: Buffer = Buffer(70)
+    pal_buf.copy_from(td_buf)
+    pal_buf.set(28, u8(8))
+    pal_caught: bool = False
+    try:
+        decode_bmp(pal_buf, DecodeOptions.default())
+    except UnsupportedPixelFormatError:
+        pal_caught = True
+    nox.test.assert_true(pal_caught, "8-bit BMP raises UnsupportedPixelFormatError")
+
+def test_file_adapters_confinement_and_no_clobber() -> None:
+    cwd: str = nox.os.current_dir()
+    tmp_dir: str = nox.path.join(cwd, "tests/tmp")
+    nox.fs.create_dir_all(tmp_dir)
+
+    src: Image = new_image(4, 3, Pixel.rgba(40, 120, 200, 255))
+
+    # 1. Save as BMP, but rename with misleading .jpg extension to verify magic-byte sniffing
+    misleading_path: str = nox.path.join(tmp_dir, "actually_bmp.jpg")
+    if nox.fs.exists(misleading_path):
+        nox.fs.remove_file(misleading_path)
+    save_image_as(src, misleading_path, "BMP", EncodeOptions.default())
+
+    probed_info: ImageInfo = probe_file(misleading_path, DecodeOptions.default())
+    nox.test.assert_eq_str(probed_info.format_name, "BMP", "probe_file ignores .jpg extension and detects BMP")
+    loaded_img: Image = open_image(misleading_path, DecodeOptions.default())
+    nox.test.assert_true(loaded_img.pixel_equals(src), "open_image decodes BMP inside .jpg filename")
+
+    # 2. No-clobber default: attempting to save again with EncodeOptions.default() fails and preserves original file
+    clobber_blocked: bool = False
+    try:
+        other_img: Image = new_image(2, 2, Pixel.rgba(255, 0, 0, 255))
+        save_image_as(other_img, misleading_path, "BMP", EncodeOptions.default())
+    except ImageIOError:
+        clobber_blocked = True
+    nox.test.assert_true(clobber_blocked, "no-clobber prevents overwriting existing file")
+
+    # 3. Failed encode (e.g. output budget exceeded) leaves existing file intact even with overwrite=True
+    tiny_out_lim: ResourceLimits = ResourceLimits(1024, 1024, 1000000, 1048576, 1048576, 10, 4096, 65536, 8, 16, 0, 1000)
+    fail_opt: EncodeOptions = EncodeOptions(tiny_out_lim, 85, True, True, True, True)
+    encode_failed: bool = False
+    try:
+        save_image_as(new_image(8, 8, Pixel.white()), misleading_path, "BMP", fail_opt)
+    except ResourceLimitError:
+        encode_failed = True
+    nox.test.assert_true(encode_failed, "oversized output rejected before overwriting file")
+    still_intact: Image = open_image(misleading_path, DecodeOptions.default())
+    nox.test.assert_true(still_intact.pixel_equals(src), "failed save leaves existing output file undamaged")
+
+    nox.fs.remove_file(misleading_path)
+
+    # 4. Confined save/open and path traversal blocking
+    save_image_confined(src, tmp_dir, "safe_out.bmp", EncodeOptions.overwrite_atomic())
+    conf_img: Image = open_image_confined(tmp_dir, "safe_out.bmp", DecodeOptions.default())
+    nox.test.assert_true(conf_img.pixel_equals(src), "confined save/open roundtrip")
+    nox.fs.remove_file(nox.path.join(tmp_dir, "safe_out.bmp"))
+
+    traversal_read_blocked: bool = False
+    try:
+        open_image_confined(tmp_dir, "../../AGENTS.md", DecodeOptions.default())
+    except ImageIOError:
+        traversal_read_blocked = True
+    nox.test.assert_true(traversal_read_blocked, "open_image_confined blocks ../ traversal")
+
+    traversal_write_blocked: bool = False
+    try:
+        save_image_confined(src, tmp_dir, "../escaped.bmp", EncodeOptions.overwrite_atomic())
+    except ImageIOError:
+        traversal_write_blocked = True
+    nox.test.assert_true(traversal_write_blocked, "save_image_confined blocks ../ traversal")
+
+    caps: list[CodecCapability] = list_codec_capabilities()
+    nox.test.assert_true(len(caps) >= 8, "codec capability table populated")
+
+test_magic_byte_sniffing()
+test_bmp_24bit_and_32bit_roundtrips()
+test_bmp_top_down_and_negative_cases()
+test_file_adapters_confinement_and_no_clobber()
+print("portable_codecs_test-ok")

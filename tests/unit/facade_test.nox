@@ -1,0 +1,35 @@
+import nox.test
+from nox.buffer import Buffer
+from prism import PRISM_VERSION, DecodeOptions, DimensionError, EncodeOptions, Image, ImageView, MutableImage, Pixel, PixelFormat, ResourceLimitError, ResourceLimits, decode_ppm, encode_ppm, new_image, prism_version
+
+nox.test.assert_eq_str(PRISM_VERSION, "0.5.0", "PRISM_VERSION")
+nox.test.assert_eq_str(prism_version(), "0.5.0", "prism_version()")
+img: Image = new_image(4, 4, Pixel.rgba(12, 34, 56, 255))
+nox.test.assert_eq_int(img.width(), 4, "facade Image width")
+nox.test.assert_eq_int(img.height(), 4, "facade Image height")
+
+mut_img: MutableImage = img.to_mutable()
+mut_img.set_pixel(1, 1, Pixel.rgb(200, 100, 50))
+img2: Image = mut_img.to_image()
+view: ImageView = img2.crop_view(1, 1, 2, 2)
+nox.test.assert_true(view.get_pixel(0, 0).equals(Pixel.rgb(200, 100, 50)), "facade ImageView pixel")
+
+ppm_buf: Buffer = encode_ppm(img2, EncodeOptions.default())
+dec_img: Image = decode_ppm(ppm_buf, DecodeOptions.default())
+nox.test.assert_true(dec_img.pixel_equals(img2), "facade PPM roundtrip")
+
+lim: ResourceLimits = ResourceLimits.strict_server()
+err_caught: bool = False
+try:
+    lim.validate_dimensions(10000, 10, 4)
+except ResourceLimitError:
+    err_caught = True
+nox.test.assert_true(err_caught, "facade ResourceLimits strict_server check")
+
+dim_caught: bool = False
+try:
+    new_image(0, 5, Pixel.black())
+except DimensionError:
+    dim_caught = True
+nox.test.assert_true(dim_caught, "facade DimensionError check")
+print("facade_test-ok")

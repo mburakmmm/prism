@@ -1,0 +1,250 @@
+import nox.bytes
+import nox.fs
+from nox.binary import BinaryReader, BinaryWriter
+from nox.buffer import Buffer
+from nox.fs import FsError
+from core.errors import CorruptDataError, DimensionError, ImageIOError, UnsupportedFormatError, UnsupportedPixelFormatError
+from core.image import Image
+from core.limits import checked_add, checked_mul
+from core.metadata import ImageInfo, ImageMetadata
+from core.options import DecodeOptions, EncodeOptions
+from core.pixel import AlphaMode, ColorSpace, Pixel, PixelFormat
+from core.storage import PixelStorage
+
+__all__: list[str] = ["probe_bmp", "decode_bmp", "encode_bmp", "save_bmp", "open_bmp"]
+
+class _BmpHeader:
+    width: int
+    height: int
+    top_down: bool
+    bit_count: int
+    compression: int
+    data_offset: int
+    row_stride: int
+    pixel_format: PixelFormat
+
+    def __init__(self, width: int, height: int, top_down: bool, bit_count: int, compression: int, data_offset: int, row_stride: int, pixel_format: PixelFormat) -> None:
+        self.width = width
+        self.height = height
+        self.top_down = top_down
+        self.bit_count = bit_count
+        self.compression = compression
+        self.data_offset = data_offset
+        self.row_stride = row_stride
+        self.pixel_format = pixel_format
+
+def _compute_bmp_row_stride(width: int, bytes_per_pixel: int) -> int:
+    raw_row: int = checked_mul(width, bytes_per_pixel)
+    padded: int = checked_add(raw_row, 3)
+    return padded // 4 * 4
+
+def _parse_bmp_header(data: Buffer, opt: DecodeOptions) -> _BmpHeader:
+    total: int = data.len()
+    opt.limits.validate_input_size(total)
+    if total < 54:
+        raise CorruptDataError("BMP data is too short (< 54 bytes) for file and DIB headers")
+
+    reader: BinaryReader = BinaryReader(data)
+    b0: int = int(reader.read_u8())
+    b1: int = int(reader.read_u8())
+    if b0 != 66 or b1 != 77:
+        raise CorruptDataError("missing BMP 'BM' signature")
+
+    declared_file_size: int = int(reader.read_u32_le())
+    reader.read_u16_le()
+    reader.read_u16_le()
+    data_offset: int = int(reader.read_u32_le())
+
+    dib_size: int = int(reader.read_u32_le())
+    if dib_size < 40 or dib_size > 256:
+        raise CorruptDataError("unsupported or corrupt BMP DIB header size: " + str(dib_size))
+    header_end: int = checked_add(14, dib_size)
+    if header_end > total:
+        raise CorruptDataError("BMP DIB header extends past end of input buffer")
+    if data_offset < header_end or data_offset > total:
+        raise CorruptDataError("invalid BMP pixel data offset: " + str(data_offset))
+    if declared_file_size > 0 and declared_file_size < header_end:
+        raise CorruptDataError("corrupt BMP declared file size in header")
+
+    raw_width: int = int(reader.read_i32_le())
+    raw_height: int = int(reader.read_i32_le())
+    planes: int = int(reader.read_u16_le())
+    bit_count: int = int(reader.read_u16_le())
+    compression: int = int(reader.read_u32_le())
+
+    if raw_width <= 0:
+        raise DimensionError("BMP width must be positive (got " + str(raw_width) + ")")
+    if raw_height == 0 or raw_height <= -2147483648:
+        raise DimensionError("BMP height is invalid (got " + str(raw_height) + ")")
+    if planes != 1:
+        raise CorruptDataError("BMP planes field must be 1 (got " + str(planes) + ")")
+
+    top_down: bool = False
+    abs_height: int = raw_height
+    if raw_height < 0:
+        top_down = True
+        abs_height = -raw_height
+
+    if compression != 0:
+        if compression == 3 and bit_count == 32 and dib_size >= 56:
+            # BI_BITFIELDS 32-bit is allowed when standard BGRA masks are present
+            pass
+        else:
+            raise UnsupportedFormatError("BMP compression mode " + str(compression) + " is not supported (only uncompressed BI_RGB)")
+
+    fmt: PixelFormat = PixelFormat.RGB8
+    bpp: int = 3
+    if bit_count == 24:
+        fmt = PixelFormat.RGB8
+        bpp = 3
+    elif bit_count == 32:
+        fmt = PixelFormat.RGBA8
+        bpp = 4
+    else:
+        if bit_count == 1 or bit_count == 4 or bit_count == 8 or bit_count == 16:
+            raise UnsupportedPixelFormatError("BMP bit depth " + str(bit_count) + " is not supported in v0.2.0 (only 24-bit and 32-bit)")
+        raise CorruptDataError("invalid BMP bit depth: " + str(bit_count))
+
+    opt.limits.validate_dimensions(raw_width, abs_height, bpp)
+    row_stride: int = _compute_bmp_row_stride(raw_width, bpp)
+    required_pixel_bytes: int = checked_mul(row_stride, abs_height)
+    required_total: int = checked_add(data_offset, required_pixel_bytes)
+    if required_total > total:
+        raise CorruptDataError("truncated BMP pixel data: need " + str(required_total) + " bytes, got " + str(total))
+
+    return _BmpHeader(raw_width, abs_height, top_down, bit_count, compression, data_offset, row_stride, fmt)
+
+def probe_bmp(data: Buffer, opt: DecodeOptions) -> ImageInfo:
+    """Inspect a BMP header without allocating or decoding the pixel buffer."""
+    hdr: _BmpHeader = _parse_bmp_header(data, opt)
+    alpha: AlphaMode = AlphaMode.OPAQUE
+    if hdr.pixel_format == PixelFormat.RGBA8:
+        alpha = AlphaMode.STRAIGHT
+    return ImageInfo(hdr.width, hdr.height, hdr.pixel_format, ColorSpace.SRGB, alpha, 1, "BMP", ImageMetadata.default())
+
+def decode_bmp(data: Buffer, opt: DecodeOptions) -> Image:
+    """Decode an uncompressed 24-bit or 32-bit BMP Buffer into an RGB8 or RGBA8 Image."""
+    hdr: _BmpHeader = _parse_bmp_header(data, opt)
+    bpp: int = hdr.pixel_format.bytes_per_pixel()
+    tight_stride: int = checked_mul(hdr.width, bpp)
+    total_decoded: int = opt.limits.validate_dimensions(hdr.width, hdr.height, bpp)
+    out_buf: Buffer = Buffer(total_decoded)
+
+    y: int = 0
+    while y < hdr.height:
+        file_row: int = hdr.height - 1 - y
+        if hdr.top_down:
+            file_row = y
+        src_row_start: int = checked_add(hdr.data_offset, checked_mul(file_row, hdr.row_stride))
+        dst_row_start: int = checked_mul(y, tight_stride)
+        x: int = 0
+        while x < hdr.width:
+            src_px_off: int = src_row_start + x * bpp
+            dst_px_off: int = dst_row_start + x * bpp
+            b_val: u8 = data.get(src_px_off)
+            g_val: u8 = data.get(src_px_off + 1)
+            r_val: u8 = data.get(src_px_off + 2)
+            out_buf.set(dst_px_off, r_val)
+            out_buf.set(dst_px_off + 1, g_val)
+            out_buf.set(dst_px_off + 2, b_val)
+            if bpp == 4:
+                a_val: u8 = data.get(src_px_off + 3)
+                out_buf.set(dst_px_off + 3, a_val)
+            x = x + 1
+        y = y + 1
+
+    store: PixelStorage = PixelStorage(hdr.width, hdr.height, tight_stride, hdr.pixel_format, out_buf, opt.limits)
+    alpha: AlphaMode = AlphaMode.OPAQUE
+    if hdr.pixel_format == PixelFormat.RGBA8:
+        alpha = AlphaMode.STRAIGHT
+    return Image(store, ColorSpace.SRGB, alpha, ImageMetadata.default(), opt.limits)
+
+def encode_bmp(img: Image, opt: EncodeOptions) -> Buffer:
+    """Encode an Image as an uncompressed 24-bit (RGB8/GRAY8) or 32-bit (RGBA8) BMP Buffer."""
+    w: int = img.width()
+    h: int = img.height()
+    has_a: bool = img.pixel_format().has_alpha()
+    out_bpp: int = 3
+    bit_count: int = 24
+    if has_a:
+        out_bpp = 4
+        bit_count = 32
+
+    opt.limits.validate_dimensions(w, h, out_bpp)
+    row_stride: int = _compute_bmp_row_stride(w, out_bpp)
+    pixel_array_bytes: int = checked_mul(row_stride, h)
+    total_file_bytes: int = checked_add(54, pixel_array_bytes)
+    opt.limits.validate_output_size(total_file_bytes)
+
+    out: Buffer = Buffer(total_file_bytes)
+    writer: BinaryWriter = BinaryWriter(out)
+
+    # 14-byte BITMAPFILEHEADER
+    writer.write_u8(u8(66))
+    writer.write_u8(u8(77))
+    writer.write_u32_le(u32(total_file_bytes))
+    writer.write_u16_le(u16(0))
+    writer.write_u16_le(u16(0))
+    writer.write_u32_le(u32(54))
+
+    # 40-byte BITMAPINFOHEADER
+    writer.write_u32_le(u32(40))
+    writer.write_i32_le(i32(w))
+    writer.write_i32_le(i32(h))
+    writer.write_u16_le(u16(1))
+    writer.write_u16_le(u16(bit_count))
+    writer.write_u32_le(u32(0))
+    writer.write_u32_le(u32(pixel_array_bytes))
+    writer.write_i32_le(i32(2835))
+    writer.write_i32_le(i32(2835))
+    writer.write_u32_le(u32(0))
+    writer.write_u32_le(u32(0))
+
+    # Bottom-up rows with 4-byte zero padding
+    y: int = 0
+    while y < h:
+        file_row: int = h - 1 - y
+        row_start: int = 54 + file_row * row_stride
+        x: int = 0
+        while x < w:
+            px: Pixel = img.get_pixel(x, y)
+            off: int = row_start + x * out_bpp
+            out.set(off, u8(px.b))
+            out.set(off + 1, u8(px.g))
+            out.set(off + 2, u8(px.r))
+            if out_bpp == 4:
+                out.set(off + 3, u8(px.a))
+            x = x + 1
+        y = y + 1
+
+    return out
+
+def save_bmp(img: Image, path: str, opt: EncodeOptions) -> None:
+    """Encode and save an Image as a BMP file with no-clobber and atomic write support."""
+    if path == "":
+        raise ImageIOError("output file path cannot be empty")
+    if not opt.overwrite and nox.fs.exists(path):
+        raise ImageIOError("refusing to overwrite existing file without overwrite=True: " + path)
+    encoded: Buffer = encode_bmp(img, opt)
+    raw_text: str = nox.bytes.to_str(encoded)
+    try:
+        if opt.atomic_write:
+            nox.fs.write_string_atomic(path, raw_text)
+        else:
+            nox.fs.write_string(path, raw_text)
+    except FsError as err:
+        raise ImageIOError("failed to write BMP file: " + err.message)
+
+def open_bmp(path: str, opt: DecodeOptions) -> Image:
+    """Read and decode a BMP file from disk."""
+    if path == "":
+        raise ImageIOError("input file path cannot be empty")
+    raw_text: str = ""
+    try:
+        meta: nox.fs.FileMetadata = nox.fs.metadata(path)
+        opt.limits.validate_input_size(meta.size)
+        raw_text = nox.fs.read_to_string(path)
+    except FsError as err:
+        raise ImageIOError("failed to read BMP file: " + err.message)
+    data: Buffer = nox.bytes.from_str(raw_text)
+    return decode_bmp(data, opt)

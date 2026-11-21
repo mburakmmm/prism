@@ -1,0 +1,272 @@
+import nox.mathx
+from core.color import clamp_u8, linear_to_srgb_channel, srgb_to_linear_channel
+from core.errors import DimensionError
+from core.image import Image
+from core.pixel import Pixel
+
+__all__: list[str] = ["ResampleFilter", "is_finite_float", "require_finite_float", "bicubic_weight", "sinc", "lanczos_weight", "sample_image_at", "sample_area_box"]
+
+enum ResampleFilter:
+    NEAREST
+    BILINEAR
+    BICUBIC
+    LANCZOS2
+    LANCZOS3
+    AREA
+
+    def name(self) -> str:
+        match self:
+            case ResampleFilter.NEAREST:
+                return "NEAREST"
+            case ResampleFilter.BILINEAR:
+                return "BILINEAR"
+            case ResampleFilter.BICUBIC:
+                return "BICUBIC"
+            case ResampleFilter.LANCZOS2:
+                return "LANCZOS2"
+            case ResampleFilter.LANCZOS3:
+                return "LANCZOS3"
+            case ResampleFilter.AREA:
+                return "AREA"
+
+    def support_radius(self) -> int:
+
+        match self:
+            case ResampleFilter.NEAREST:
+                return 0
+            case ResampleFilter.BILINEAR:
+                return 1
+            case ResampleFilter.BICUBIC:
+                return 2
+            case ResampleFilter.LANCZOS2:
+                return 2
+            case ResampleFilter.LANCZOS3:
+                return 3
+            case ResampleFilter.AREA:
+                return 1
+
+def is_finite_float(v: float) -> bool:
+    """Return True if v is neither NaN nor positive/negative infinity."""
+    return v == v and v > -1.0e300 and v < 1.0e300
+
+def require_finite_float(v: float, name: str) -> float:
+    if not is_finite_float(v):
+        raise DimensionError("parameter '" + name + "' must be a finite float (got NaN or Inf)")
+    return v
+
+def _clamp_coord(idx: int, limit: int) -> int:
+    if idx < 0:
+        return 0
+    if idx >= limit:
+        return limit - 1
+    return idx
+
+def bicubic_weight(t: float) -> float:
+    """Catmull-Rom / Keys cubic interpolation kernel (a = -0.5, support = 2.0)."""
+    at: float = nox.mathx.abs(t)
+    if at <= 1.0:
+        return 1.5 * at * at * at - 2.5 * at * at + 1.0
+    if at < 2.0:
+        return -0.5 * at * at * at + 2.5 * at * at - 4.0 * at + 2.0
+    return 0.0
+
+def sinc(x: float) -> float:
+    """Normalized sinc(x) = sin(pi * x) / (pi * x)."""
+    ax: float = nox.mathx.abs(x)
+    if ax < 1.0e-7:
+        return 1.0
+    pix: float = nox.mathx.pi() * x
+    return nox.mathx.sin(pix) / pix
+
+def lanczos_weight(t: float, lobes: int) -> float:
+    """Lanczos windowed-sinc kernel with support radius = lobes (2 or 3)."""
+    at: float = nox.mathx.abs(t)
+    r: float = float(lobes)
+    if at >= r:
+        return 0.0
+    return sinc(t) * sinc(t / r)
+
+def _kernel_weight(filter: ResampleFilter, dist: float) -> float:
+    ad: float = nox.mathx.abs(dist)
+    match filter:
+        case ResampleFilter.BILINEAR:
+            if ad >= 1.0:
+                return 0.0
+            return 1.0 - ad
+        case ResampleFilter.BICUBIC:
+            return bicubic_weight(dist)
+        case ResampleFilter.LANCZOS2:
+            return lanczos_weight(dist, 2)
+        case ResampleFilter.LANCZOS3:
+            return lanczos_weight(dist, 3)
+        case _:
+            if ad < 0.5:
+                return 1.0
+            return 0.0
+
+def sample_image_at(img: Image, sx: float, sy: float, filter: ResampleFilter, alpha_safe: bool, linear_light: bool) -> Pixel:
+    """Sample img at continuous source pixel coordinate (sx, sy) with clamped borders."""
+    w: int = img.width()
+    h: int = img.height()
+
+    if filter == ResampleFilter.NEAREST:
+        nx: int = _clamp_coord(int(nox.mathx.floor(sx + 0.5)), w)
+        ny: int = _clamp_coord(int(nox.mathx.floor(sy + 0.5)), h)
+        return img.get_pixel(nx, ny)
+
+    rad: int = filter.support_radius()
+    base_x: int = int(nox.mathx.floor(sx))
+    base_y: int = int(nox.mathx.floor(sy))
+
+    start_x: int = base_x - rad + 1
+    end_x: int = base_x + rad
+    start_y: int = base_y - rad + 1
+    end_y: int = base_y + rad
+
+    sum_w: float = 0.0
+    sum_wa: float = 0.0
+    sum_r: float = 0.0
+    sum_g: float = 0.0
+    sum_b: float = 0.0
+
+    iy: int = start_y
+    while iy <= end_y:
+        wy: float = _kernel_weight(filter, sy - float(iy))
+        if wy != 0.0:
+            cy: int = _clamp_coord(iy, h)
+            ix: int = start_x
+            while ix <= end_x:
+                wx: float = _kernel_weight(filter, sx - float(ix))
+                w_xy: float = wx * wy
+                if w_xy != 0.0:
+                    cx: int = _clamp_coord(ix, w)
+                    px: Pixel = img.get_pixel(cx, cy)
+                    sum_w = sum_w + w_xy
+                    a_factor: float = 1.0
+                    if alpha_safe:
+                        a_factor = float(px.a) / 255.0
+                    wa: float = w_xy * a_factor
+                    sum_wa = sum_wa + wa
+                    if linear_light:
+                        sum_r = sum_r + wa * srgb_to_linear_channel(px.r)
+                        sum_g = sum_g + wa * srgb_to_linear_channel(px.g)
+                        sum_b = sum_b + wa * srgb_to_linear_channel(px.b)
+                    else:
+                        sum_r = sum_r + wa * float(px.r)
+                        sum_g = sum_g + wa * float(px.g)
+                        sum_b = sum_b + wa * float(px.b)
+                ix = ix + 1
+        iy = iy + 1
+
+    if nox.mathx.abs(sum_w) <= 1.0e-9:
+        nx2: int = _clamp_coord(int(nox.mathx.floor(sx + 0.5)), w)
+        ny2: int = _clamp_coord(int(nox.mathx.floor(sy + 0.5)), h)
+        return img.get_pixel(nx2, ny2)
+
+    out_a: int = 255
+    if alpha_safe:
+        out_a_f: float = sum_wa / sum_w * 255.0
+        out_a = clamp_u8(int(out_a_f + 0.5))
+        if out_a == 0 or nox.mathx.abs(sum_wa) <= 1.0e-9:
+            return Pixel(0, 0, 0, 0)
+
+    denom: float = sum_w
+    if alpha_safe:
+        denom = sum_wa
+    if nox.mathx.abs(denom) <= 1.0e-9:
+        return Pixel(0, 0, 0, 0)
+
+    norm_r: float = sum_r / denom
+    norm_g: float = sum_g / denom
+    norm_b: float = sum_b / denom
+
+    out_r: int = 0
+    out_g: int = 0
+    out_b: int = 0
+    if linear_light:
+        out_r = linear_to_srgb_channel(norm_r)
+        out_g = linear_to_srgb_channel(norm_g)
+        out_b = linear_to_srgb_channel(norm_b)
+    else:
+        out_r = clamp_u8(int(norm_r + 0.5))
+        out_g = clamp_u8(int(norm_g + 0.5))
+        out_b = clamp_u8(int(norm_b + 0.5))
+
+    return Pixel(out_r, out_g, out_b, out_a)
+
+def sample_area_box(img: Image, x0: float, y0: float, x1: float, y1: float, alpha_safe: bool, linear_light: bool) -> Pixel:
+    """Integrate source pixels overlapping box [x0, x1] x [y0, y1] for AREA downsampling."""
+    w: int = img.width()
+    h: int = img.height()
+    ix_start: int = _clamp_coord(int(nox.mathx.floor(x0)), w)
+    ix_end: int = _clamp_coord(int(nox.mathx.ceil(x1)) - 1, w)
+    iy_start: int = _clamp_coord(int(nox.mathx.floor(y0)), h)
+    iy_end: int = _clamp_coord(int(nox.mathx.ceil(y1)) - 1, h)
+    if ix_end < ix_start:
+        ix_end = ix_start
+    if iy_end < iy_start:
+        iy_end = iy_start
+
+    sum_w: float = 0.0
+    sum_wa: float = 0.0
+    sum_r: float = 0.0
+    sum_g: float = 0.0
+    sum_b: float = 0.0
+
+    iy: int = iy_start
+    while iy <= iy_end:
+        py0: float = float(iy)
+        py1: float = float(iy + 1)
+        oy0: float = nox.mathx.max(y0, py0)
+        oy1: float = nox.mathx.min(y1, py1)
+        wy: float = oy1 - oy0
+        if wy <= 0.0:
+            wy = 1.0
+        ix: int = ix_start
+        while ix <= ix_end:
+            px0: float = float(ix)
+            px1: float = float(ix + 1)
+            ox0: float = nox.mathx.max(x0, px0)
+            ox1: float = nox.mathx.min(x1, px1)
+            wx: float = ox1 - ox0
+            if wx <= 0.0:
+                wx = 1.0
+            w_xy: float = wx * wy
+            px: Pixel = img.get_pixel(ix, iy)
+            sum_w = sum_w + w_xy
+            a_factor: float = 1.0
+            if alpha_safe:
+                a_factor = float(px.a) / 255.0
+            wa: float = w_xy * a_factor
+            sum_wa = sum_wa + wa
+            if linear_light:
+                sum_r = sum_r + wa * srgb_to_linear_channel(px.r)
+                sum_g = sum_g + wa * srgb_to_linear_channel(px.g)
+                sum_b = sum_b + wa * srgb_to_linear_channel(px.b)
+            else:
+                sum_r = sum_r + wa * float(px.r)
+                sum_g = sum_g + wa * float(px.g)
+                sum_b = sum_b + wa * float(px.b)
+            ix = ix + 1
+        iy = iy + 1
+
+    if sum_w <= 1.0e-9:
+        return img.get_pixel(ix_start, iy_start)
+
+    out_a: int = 255
+    if alpha_safe:
+        out_a = clamp_u8(int(sum_wa / sum_w * 255.0 + 0.5))
+        if out_a == 0 or sum_wa <= 1.0e-9:
+            return Pixel(0, 0, 0, 0)
+
+    denom: float = sum_w
+    if alpha_safe:
+        denom = sum_wa
+
+    norm_r: float = sum_r / denom
+    norm_g: float = sum_g / denom
+    norm_b: float = sum_b / denom
+
+    if linear_light:
+        return Pixel(linear_to_srgb_channel(norm_r), linear_to_srgb_channel(norm_g), linear_to_srgb_channel(norm_b), out_a)
+    return Pixel(clamp_u8(int(norm_r + 0.5)), clamp_u8(int(norm_g + 0.5)), clamp_u8(int(norm_b + 0.5)), out_a)

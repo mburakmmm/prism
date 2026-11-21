@@ -1,0 +1,125 @@
+from nox.buffer import Buffer
+from core.errors import DimensionError, InvalidImageError
+from core.limits import ResourceLimits, checked_add, checked_mul, checked_stride
+from core.pixel import Pixel, PixelFormat
+
+__all__: list[str] = ["PixelStorage"]
+
+class PixelStorage:
+    """Bounds-checked byte storage owning an image's row-major pixel buffer."""
+
+    width: int
+    height: int
+    stride: int
+    pixel_format: PixelFormat
+    buf: Buffer
+
+    def __init__(self, width: int, height: int, stride: int, pixel_format: PixelFormat, buf: Buffer, lim: ResourceLimits) -> None:
+        pixel_format.require_core_supported()
+        bpp: int = pixel_format.bytes_per_pixel()
+        valid_stride: int = checked_stride(width, bpp, stride)
+        req_bytes: int = lim.validate_stride_and_buffer(width, height, valid_stride, bpp)
+        if buf.len() < req_bytes:
+            raise InvalidImageError("backing Buffer length " + str(buf.len()) + " is smaller than required " + str(req_bytes) + " bytes")
+        self.width = width
+        self.height = height
+        self.stride = valid_stride
+        self.pixel_format = pixel_format
+        self.buf = buf
+
+    @staticmethod
+    def allocate(width: int, height: int, stride: int, pixel_format: PixelFormat, fill_px: Pixel, lim: ResourceLimits) -> PixelStorage:
+
+        pixel_format.require_core_supported()
+        bpp: int = pixel_format.bytes_per_pixel()
+        valid_stride: int = checked_stride(width, bpp, stride)
+        req_bytes: int = lim.validate_stride_and_buffer(width, height, valid_stride, bpp)
+        buf: Buffer = Buffer(req_bytes)
+        store: PixelStorage = PixelStorage(width, height, valid_stride, pixel_format, buf, lim)
+        store.fill_all(fill_px)
+        return store
+
+    def check_coords(self, x: int, y: int) -> int:
+
+        if x < 0 or x >= self.width:
+            raise DimensionError("pixel x coordinate " + str(x) + " out of bounds [0, " + str(self.width) + ")")
+        if y < 0 or y >= self.height:
+            raise DimensionError("pixel y coordinate " + str(y) + " out of bounds [0, " + str(self.height) + ")")
+        row_off: int = checked_mul(y, self.stride)
+        col_off: int = checked_mul(x, self.pixel_format.bytes_per_pixel())
+        return checked_add(row_off, col_off)
+
+    def read_pixel(self, x: int, y: int) -> Pixel:
+
+        off: int = self.check_coords(x, y)
+        match self.pixel_format:
+            case PixelFormat.GRAY8:
+                g: int = int(self.buf.get(off))
+                return Pixel(g, g, g, 255)
+            case PixelFormat.RGB8:
+                r: int = int(self.buf.get(off))
+                g2: int = int(self.buf.get(off + 1))
+                b: int = int(self.buf.get(off + 2))
+                return Pixel(r, g2, b, 255)
+            case PixelFormat.RGBA8:
+                r2: int = int(self.buf.get(off))
+                g3: int = int(self.buf.get(off + 1))
+                b2: int = int(self.buf.get(off + 2))
+                a: int = int(self.buf.get(off + 3))
+                return Pixel(r2, g3, b2, a)
+            case _:
+                self.pixel_format.require_core_supported()
+                return Pixel.black()
+
+    def write_pixel(self, x: int, y: int, px: Pixel) -> None:
+
+        off: int = self.check_coords(x, y)
+        match self.pixel_format:
+            case PixelFormat.GRAY8:
+                self.buf.set(off, u8(px.luma_srgb()))
+            case PixelFormat.RGB8:
+                self.buf.set(off, u8(px.r))
+                self.buf.set(off + 1, u8(px.g))
+                self.buf.set(off + 2, u8(px.b))
+            case PixelFormat.RGBA8:
+                self.buf.set(off, u8(px.r))
+                self.buf.set(off + 1, u8(px.g))
+                self.buf.set(off + 2, u8(px.b))
+                self.buf.set(off + 3, u8(px.a))
+            case _:
+                self.pixel_format.require_core_supported()
+
+    def fill_all(self, px: Pixel) -> None:
+
+        y: int = 0
+        while y < self.height:
+            x: int = 0
+            while x < self.width:
+                self.write_pixel(x, y, px)
+                x = x + 1
+            y = y + 1
+
+    def clone_storage(self, lim: ResourceLimits) -> PixelStorage:
+
+        total_len: int = self.buf.len()
+        new_buf: Buffer = Buffer(total_len)
+        new_buf.copy_from(self.buf)
+        return PixelStorage(self.width, self.height, self.stride, self.pixel_format, new_buf, lim)
+
+    def copy_tight_bytes(self) -> Buffer:
+
+        """Return a freshly allocated tightly-packed copy of the pixel bytes."""
+        bpp: int = self.pixel_format.bytes_per_pixel()
+        row_bytes: int = checked_mul(self.width, bpp)
+        total_bytes: int = checked_mul(row_bytes, self.height)
+        out: Buffer = Buffer(total_bytes)
+        y: int = 0
+        while y < self.height:
+            src_row_start: int = checked_mul(y, self.stride)
+            dst_row_start: int = checked_mul(y, row_bytes)
+            i: int = 0
+            while i < row_bytes:
+                out.set(dst_row_start + i, self.buf.get(src_row_start + i))
+                i = i + 1
+            y = y + 1
+        return out

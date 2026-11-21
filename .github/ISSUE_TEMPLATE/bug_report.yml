@@ -1,0 +1,39 @@
+name: Bug Report
+description: Report a bug, codec parsing issue, or unexpected pixel/color behavior in Prism
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Bug Summary
+      description: Clear description of the defect or unexpected behavior.
+    validations:
+      required: true
+  - type: input
+    id: noxc_version
+    attributes:
+      label: Nox Compiler Version
+      description: Output of `noxc version` (e.g., `noxc 2.2.38`).
+      placeholder: "noxc 2.2.38"
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Compiler Backend & Profile
+      options:
+        - "LLVM (default hosted)"
+        - "QBE (--backend qbe)"
+        - "Freestanding (--profile freestanding)"
+        - "WASM (wasm32-wasi / wasm32-freestanding)"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal Reproducer (.nox)
+      description: Provide a self-contained `.nox` snippet or synthetic input bytes reproducing the issue.
+      render: python
+    validations:
+      required: true

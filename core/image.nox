@@ -1,0 +1,282 @@
+from nox.buffer import Buffer
+from core.errors import DimensionError, InvalidImageError
+from core.limits import ResourceLimits, checked_add
+from core.metadata import ImageInfo, ImageMetadata
+from core.pixel import AlphaMode, ColorSpace, Pixel, PixelFormat
+from core.storage import PixelStorage
+
+__all__: list[str] = ["ImageView", "MutableImage", "Image", "new_image", "new_image_with_format"]
+
+def _default_alpha_for_format(fmt: PixelFormat) -> AlphaMode:
+    if fmt.has_alpha():
+        return AlphaMode.STRAIGHT
+    return AlphaMode.OPAQUE
+
+class ImageView:
+    """Immutable, bounds-checked sub-rectangle view keeping the parent PixelStorage alive."""
+
+    store: PixelStorage
+    offset_x: int
+    offset_y: int
+    width: int
+    height: int
+    color_space: ColorSpace
+    alpha_mode: AlphaMode
+
+    def __init__(self, store: PixelStorage, offset_x: int, offset_y: int, width: int, height: int, color_space: ColorSpace, alpha_mode: AlphaMode) -> None:
+        if width <= 0 or height <= 0:
+            raise DimensionError("ImageView width and height must be positive")
+        if offset_x < 0 or offset_y < 0:
+            raise DimensionError("ImageView offset_x and offset_y cannot be negative")
+        end_x: int = checked_add(offset_x, width)
+        end_y: int = checked_add(offset_y, height)
+        if end_x > store.width or end_y > store.height:
+            raise DimensionError("ImageView rectangle (" + str(offset_x) + "," + str(offset_y) + " " + str(width) + "x" + str(height) + ") exceeds parent dimensions " + str(store.width) + "x" + str(store.height))
+        self.store = store
+        self.offset_x = offset_x
+        self.offset_y = offset_y
+        self.width = width
+        self.height = height
+        self.color_space = color_space
+        self.alpha_mode = alpha_mode
+
+    def pixel_format(self) -> PixelFormat:
+
+        return self.store.pixel_format
+
+    def get_pixel(self, x: int, y: int) -> Pixel:
+
+        if x < 0 or x >= self.width:
+            raise DimensionError("view x coordinate " + str(x) + " out of bounds [0, " + str(self.width) + ")")
+        if y < 0 or y >= self.height:
+            raise DimensionError("view y coordinate " + str(y) + " out of bounds [0, " + str(self.height) + ")")
+        parent_x: int = checked_add(self.offset_x, x)
+        parent_y: int = checked_add(self.offset_y, y)
+        return self.store.read_pixel(parent_x, parent_y)
+
+    def sub_view(self, x: int, y: int, w: int, h: int) -> ImageView:
+
+        if x < 0 or y < 0 or w <= 0 or h <= 0:
+            raise DimensionError("sub_view coordinates must be non-negative and size positive")
+        end_x: int = checked_add(x, w)
+        end_y: int = checked_add(y, h)
+        if end_x > self.width or end_y > self.height:
+            raise DimensionError("sub_view rectangle exceeds current ImageView bounds")
+        return ImageView(self.store, checked_add(self.offset_x, x), checked_add(self.offset_y, y), w, h, self.color_space, self.alpha_mode)
+
+    def to_image(self, lim: ResourceLimits) -> Image:
+
+        new_store: PixelStorage = PixelStorage.allocate(self.width, self.height, 0, self.store.pixel_format, Pixel.transparent(), lim)
+        y: int = 0
+        while y < self.height:
+            x: int = 0
+            while x < self.width:
+                px: Pixel = self.get_pixel(x, y)
+                new_store.write_pixel(x, y, px)
+                x = x + 1
+            y = y + 1
+        return Image(new_store, self.color_space, self.alpha_mode, ImageMetadata.default(), lim)
+
+class MutableImage:
+    """Explicitly mutable image surface that snapshots into an immutable Image."""
+
+    store: PixelStorage
+    color_space: ColorSpace
+    alpha_mode: AlphaMode
+    metadata: ImageMetadata
+    limits: ResourceLimits
+
+    def __init__(self, store: PixelStorage, color_space: ColorSpace, alpha_mode: AlphaMode, metadata: ImageMetadata, lim: ResourceLimits) -> None:
+        self.store = store
+        self.color_space = color_space
+        self.alpha_mode = alpha_mode
+        self.metadata = metadata
+        self.limits = lim
+
+    @staticmethod
+    def create(width: int, height: int, fmt: PixelFormat, fill_px: Pixel, lim: ResourceLimits) -> MutableImage:
+
+        store: PixelStorage = PixelStorage.allocate(width, height, 0, fmt, fill_px, lim)
+        return MutableImage(store, ColorSpace.SRGB, _default_alpha_for_format(fmt), ImageMetadata.default(), lim)
+
+    def width(self) -> int:
+
+        return self.store.width
+
+    def height(self) -> int:
+
+        return self.store.height
+
+    def stride(self) -> int:
+
+        return self.store.stride
+
+    def pixel_format(self) -> PixelFormat:
+
+        return self.store.pixel_format
+
+    def get_pixel(self, x: int, y: int) -> Pixel:
+
+        return self.store.read_pixel(x, y)
+
+    def set_pixel(self, x: int, y: int, px: Pixel) -> None:
+
+        self.store.write_pixel(x, y, px)
+
+    def fill(self, px: Pixel) -> None:
+
+        self.store.fill_all(px)
+
+    def fill_rect(self, x: int, y: int, w: int, h: int, px: Pixel) -> None:
+
+        if x < 0 or y < 0 or w <= 0 or h <= 0:
+            raise DimensionError("fill_rect requires non-negative origin and positive size")
+        end_x: int = checked_add(x, w)
+        end_y: int = checked_add(y, h)
+        if end_x > self.store.width or end_y > self.store.height:
+            raise DimensionError("fill_rect exceeds image bounds")
+        cy: int = y
+        while cy < end_y:
+            cx: int = x
+            while cx < end_x:
+                self.store.write_pixel(cx, cy, px)
+                cx = cx + 1
+            cy = cy + 1
+
+    def clone(self) -> MutableImage:
+
+        return MutableImage(self.store.clone_storage(self.limits), self.color_space, self.alpha_mode, self.metadata.clone(), self.limits)
+
+    def to_image(self) -> Image:
+
+        """Create an isolated immutable Image snapshot (subsequent mutations do not affect it)."""
+        return Image(self.store.clone_storage(self.limits), self.color_space, self.alpha_mode, self.metadata.clone(), self.limits)
+
+class Image:
+    """Immutable raster image value with guaranteed positive dimensions and isolated storage."""
+
+    store: PixelStorage
+    color_space: ColorSpace
+    alpha_mode: AlphaMode
+    metadata: ImageMetadata
+    limits: ResourceLimits
+
+    def __init__(self, store: PixelStorage, color_space: ColorSpace, alpha_mode: AlphaMode, metadata: ImageMetadata, lim: ResourceLimits) -> None:
+        self.store = store
+        self.color_space = color_space
+        self.alpha_mode = alpha_mode
+        self.metadata = metadata
+        self.limits = lim
+
+    @staticmethod
+    def create(width: int, height: int, fmt: PixelFormat, fill_px: Pixel, lim: ResourceLimits) -> Image:
+
+        store: PixelStorage = PixelStorage.allocate(width, height, 0, fmt, fill_px, lim)
+        return Image(store, ColorSpace.SRGB, _default_alpha_for_format(fmt), ImageMetadata.default(), lim)
+
+    @staticmethod
+    def from_buffer(width: int, height: int, stride: int, fmt: PixelFormat, src_buf: Buffer, lim: ResourceLimits) -> Image:
+
+        """Create an Image by copying and validating bytes from an untrusted caller Buffer."""
+        fmt.require_core_supported()
+        bpp: int = fmt.bytes_per_pixel()
+        req_bytes: int = lim.validate_stride_and_buffer(width, height, stride, bpp)
+        if src_buf.len() < req_bytes:
+            raise InvalidImageError("source Buffer length " + str(src_buf.len()) + " is smaller than required " + str(req_bytes))
+        owned_buf: Buffer = Buffer(req_bytes)
+        i: int = 0
+        while i < req_bytes:
+            owned_buf.set(i, src_buf.get(i))
+            i = i + 1
+        store: PixelStorage = PixelStorage(width, height, stride, fmt, owned_buf, lim)
+        return Image(store, ColorSpace.SRGB, _default_alpha_for_format(fmt), ImageMetadata.default(), lim)
+
+    def width(self) -> int:
+
+        return self.store.width
+
+    def height(self) -> int:
+
+        return self.store.height
+
+    def stride(self) -> int:
+
+        return self.store.stride
+
+    def channels(self) -> int:
+
+        return self.store.pixel_format.channels()
+
+    def bytes_per_pixel(self) -> int:
+
+        return self.store.pixel_format.bytes_per_pixel()
+
+    def pixel_format(self) -> PixelFormat:
+
+        return self.store.pixel_format
+
+    def info(self, format_name: str) -> ImageInfo:
+
+        return ImageInfo(self.store.width, self.store.height, self.store.pixel_format, self.color_space, self.alpha_mode, 1, format_name, self.metadata.clone())
+
+    def get_pixel(self, x: int, y: int) -> Pixel:
+
+        return self.store.read_pixel(x, y)
+
+    def clone(self) -> Image:
+
+        return Image(self.store.clone_storage(self.limits), self.color_space, self.alpha_mode, self.metadata.clone(), self.limits)
+
+    def to_mutable(self) -> MutableImage:
+
+        return MutableImage(self.store.clone_storage(self.limits), self.color_space, self.alpha_mode, self.metadata.clone(), self.limits)
+
+    def crop_view(self, x: int, y: int, w: int, h: int) -> ImageView:
+
+        return ImageView(self.store, x, y, w, h, self.color_space, self.alpha_mode)
+
+    def crop(self, x: int, y: int, w: int, h: int) -> Image:
+
+        view: ImageView = self.crop_view(x, y, w, h)
+        return view.to_image(self.limits)
+
+    def convert_format(self, target_fmt: PixelFormat) -> Image:
+
+        target_fmt.require_core_supported()
+        new_store: PixelStorage = PixelStorage.allocate(self.store.width, self.store.height, 0, target_fmt, Pixel.transparent(), self.limits)
+        y: int = 0
+        while y < self.store.height:
+            x: int = 0
+            while x < self.store.width:
+                px: Pixel = self.store.read_pixel(x, y)
+                new_store.write_pixel(x, y, px)
+                x = x + 1
+            y = y + 1
+        return Image(new_store, self.color_space, _default_alpha_for_format(target_fmt), self.metadata.clone(), self.limits)
+
+    def raw_bytes(self) -> Buffer:
+
+        """Return a freshly copied tightly-packed Buffer so callers cannot mutate internal storage."""
+        return self.store.copy_tight_bytes()
+
+    def pixel_equals(self, other: Image) -> bool:
+
+        if self.store.width != other.store.width or self.store.height != other.store.height:
+            return False
+        y: int = 0
+        while y < self.store.height:
+            x: int = 0
+            while x < self.store.width:
+                if not self.get_pixel(x, y).equals(other.get_pixel(x, y)):
+                    return False
+                x = x + 1
+            y = y + 1
+        return True
+
+def new_image(width: int, height: int, fill_px: Pixel) -> Image:
+    """Create a new RGBA8 sRGB Image filled with fill_px using default ResourceLimits."""
+    return Image.create(width, height, PixelFormat.RGBA8, fill_px, ResourceLimits.default())
+
+def new_image_with_format(width: int, height: int, fmt: PixelFormat, fill_px: Pixel, lim: ResourceLimits) -> Image:
+    """Create a new Image with explicit PixelFormat and ResourceLimits."""
+    return Image.create(width, height, fmt, fill_px, lim)

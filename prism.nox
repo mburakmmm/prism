@@ -1,0 +1,32 @@
+from adapters.file import open_image, open_image_confined, probe_file, save_image, save_image_as, save_image_confined
+from adapters.memory import decode, encode, probe
+from codecs.bmp import decode_bmp, encode_bmp, open_bmp, probe_bmp, save_bmp
+from codecs.deflate import adler32_bytes, crc32_bytes, crc32_span, zlib_compress, zlib_decompress
+from codecs.pgm import decode_pgm, encode_pgm, open_pgm, probe_pgm, save_pgm
+from codecs.png import decode_png, encode_png, open_png, paeth_predictor, probe_png, save_png
+from codecs.ppm import decode_ppm, encode_ppm, open_ppm, probe_ppm, save_ppm
+from codecs.reader import decode_bytes, probe_bytes
+from codecs.registry import CodecCapability, is_format_decode_supported, is_format_encode_supported, list_codec_capabilities
+from codecs.sniff import ImageFormat, format_from_extension, format_from_name, sniff_format
+from codecs.writer import encode_bytes, encode_to_format
+from core.color import blend_images_source_over, blend_source_over_linear, blend_source_over_straight, clamp_u8, convert_color_space, image_to_premultiplied, image_to_straight, linear_to_srgb_channel, premultiply_pixel, srgb_to_linear_channel, unpremultiply_pixel
+from core.errors import CodecUnavailableError, ColorProfileError, CorruptDataError, DecodeError, DimensionError, EncodeError, ImageIOError, InvalidImageError, NativeAdapterError, PipelineError, PrismError, ResourceLimitError, UnsupportedFormatError, UnsupportedPixelFormatError
+from core.image import Image, ImageView, MutableImage, new_image, new_image_with_format
+from core.limits import ResourceLimits, checked_add, checked_buffer_size, checked_mul, checked_stride, checked_sub
+from core.metadata import ExifSummary, ImageInfo, ImageMetadata, build_minimal_exif_orientation, parse_exif_buffer, sanitize_exif_buffer, strip_private_metadata_from_image_meta
+from core.options import DecodeOptions, EncodeOptions
+from core.pixel import AlphaMode, ColorSpace, Pixel, PixelFormat
+from core.storage import PixelStorage
+from transforms.affine import AffineMatrix2D, affine_transform
+from transforms.border import BorderMode, pad_image, pad_with_mode, sample_with_border
+from transforms.crop import CropBoundsPolicy, crop_image, crop_with_policy
+from transforms.flip import flip_horizontal, flip_vertical, transpose, transverse
+from transforms.resample import ResampleFilter, bicubic_weight, is_finite_float, lanczos_weight, require_finite_float, sample_area_box, sample_image_at, sinc
+from transforms.resize import ResizeFit, ResizeOptions, resize_exact, resize_image, resize_with_options, thumbnail
+from transforms.rotate import apply_exif_orientation, normalize_orientation, rotate90, rotate180, rotate270, rotate_arbitrary
+
+PRISM_VERSION: str = "0.5.0"
+
+def prism_version() -> str:
+    """Return the active Prism semantic version string."""
+    return PRISM_VERSION

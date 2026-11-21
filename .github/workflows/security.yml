@@ -1,0 +1,40 @@
+name: Security Gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  security-audit:
+    name: Security, Fuzzing & Resource Limit Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure Git line endings
+        run: git config --global core.autocrlf false
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build prerequisites (Linux)
+        run: sudo apt-get update && sudo apt-get install -y build-essential curl
+
+      - name: Install Nox
+        run: |
+          curl -fsSL https://noxlang.com/install.sh | bash
+          echo "$HOME/.nox-lang/bin" >> $GITHUB_PATH
+
+      - name: Check Pure-NOX Source Boundary & Fixture Integrity
+        run: |
+          test -f nox.json
+          grep -q '"source": "nox"' nox.json
+          shasum -a 256 tests/fixtures/checkerboard_4x4.ppm tests/fixtures/gradient_4x4.pgm tests/fixtures/checkerboard_4x4.bmp tests/fixtures/rgba_4x4.bmp tests/fixtures/rgba_4x4.png
+
+      - name: Run 10k Malformed Header Fuzz & Security Boundary Suites
+        run: |
+          noxc test tests/unit/core_pixel_test.nox
+          noxc test tests/unit/color_metadata_test.nox
+          noxc test tests/codecs/png_test.nox
+          noxc test tests/fuzz/header_fuzz_test.nox

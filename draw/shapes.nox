@@ -1,0 +1,299 @@
+import nox.mathx
+from core.errors import DimensionError, InvalidImageError
+from core.pixel import Pixel
+from draw.canvas import Canvas
+from draw.rasterizer import Point2D, draw_line_aa, draw_line_bresenham
+
+def draw_line(canvas: Canvas, x0: int, y0: int, x1: int, y1: int, color: Pixel, thickness: int, antialias: bool) -> None:
+    """Draw a line between `(x0, y0)` and `(x1, y1)` with configurable thickness >= 1 and optional anti-aliasing."""
+    if thickness < 1:
+        raise DimensionError("draw_line thickness must be >= 1")
+    if thickness == 1:
+        if antialias:
+            draw_line_aa(canvas, x0, y0, x1, y1, color)
+        else:
+            draw_line_bresenham(canvas, x0, y0, x1, y1, color)
+        return
+
+    half: int = thickness // 2
+    oy: int = -half
+    while oy <= half:
+        ox: int = -half
+        while ox <= half:
+            if ox * ox + oy * oy <= half * half + 1:
+                if antialias:
+                    draw_line_aa(canvas, x0 + ox, y0 + oy, x1 + ox, y1 + oy, color)
+                else:
+                    draw_line_bresenham(canvas, x0 + ox, y0 + oy, x1 + ox, y1 + oy, color)
+            ox = ox + 1
+        oy = oy + 1
+
+def fill_rect(canvas: Canvas, x: int, y: int, w: int, h: int, color: Pixel) -> None:
+    """Fill a rectangle `(x, y, w, h)` using Porter-Duff SOURCE_OVER blending and active clip bounds."""
+    if w <= 0 or h <= 0:
+        return
+    py: int = y
+    while py < y + h:
+        px: int = x
+        while px < x + w:
+            canvas.blend_pixel(px, py, color)
+            px = px + 1
+        py = py + 1
+
+def draw_rect(canvas: Canvas, x: int, y: int, w: int, h: int, color: Pixel, thickness: int) -> None:
+    """Draw a stroked rectangle border of `thickness >= 1`."""
+    if thickness < 1:
+        raise DimensionError("draw_rect thickness must be >= 1")
+    if w <= 0 or h <= 0:
+        return
+    t: int = 0
+    while t < thickness:
+        rx: int = x + t
+        ry: int = y + t
+        rw: int = w - 2 * t
+        rh: int = h - 2 * t
+        if rw <= 0 or rh <= 0:
+            break
+        draw_line_bresenham(canvas, rx, ry, rx + rw - 1, ry, color)
+        if rh > 1:
+            draw_line_bresenham(canvas, rx, ry + rh - 1, rx + rw - 1, ry + rh - 1, color)
+        if rh > 2:
+            draw_line_bresenham(canvas, rx, ry + 1, rx, ry + rh - 2, color)
+            if rw > 1:
+                draw_line_bresenham(canvas, rx + rw - 1, ry + 1, rx + rw - 1, ry + rh - 2, color)
+        t = t + 1
+
+def fill_circle(canvas: Canvas, cx: int, cy: int, radius: int, color: Pixel) -> None:
+    """Fill a circle centered at `(cx, cy)` with `radius >= 0`."""
+    if radius < 0:
+        raise DimensionError("fill_circle radius must be non-negative")
+    r2: int = radius * radius
+    dy: int = -radius
+    while dy <= radius:
+        dx: int = -radius
+        while dx <= radius:
+            if dx * dx + dy * dy <= r2:
+                canvas.blend_pixel(cx + dx, cy + dy, color)
+            dx = dx + 1
+        dy = dy + 1
+
+def draw_circle(canvas: Canvas, cx: int, cy: int, radius: int, color: Pixel, thickness: int) -> None:
+    """Draw a circle outline centered at `(cx, cy)` with `radius >= 0` and `thickness >= 1`."""
+    if radius < 0:
+        raise DimensionError("draw_circle radius must be non-negative")
+    if thickness < 1:
+        raise DimensionError("draw_circle thickness must be >= 1")
+    if radius == 0:
+        canvas.blend_pixel(cx, cy, color)
+        return
+    r_outer: int = radius
+    r_inner: int = radius - thickness
+    if r_inner < 0:
+        r_inner = 0
+    ro2: int = r_outer * r_outer
+    ri2: int = r_inner * r_inner
+    dy: int = -r_outer
+    while dy <= r_outer:
+        dx: int = -r_outer
+        while dx <= r_outer:
+            d2: int = dx * dx + dy * dy
+            if d2 <= ro2 and d2 >= ri2:
+                canvas.blend_pixel(cx + dx, cy + dy, color)
+            dx = dx + 1
+        dy = dy + 1
+
+def fill_ellipse(canvas: Canvas, cx: int, cy: int, rx: int, ry: int, color: Pixel) -> None:
+    """Fill an axis-aligned ellipse centered at `(cx, cy)` with semi-axes `rx >= 1, ry >= 1`."""
+    if rx <= 0 or ry <= 0:
+        raise DimensionError("fill_ellipse semi-axes rx and ry must be positive")
+    rx2: float = float(rx * rx)
+    ry2: float = float(ry * ry)
+    dy: int = -ry
+    while dy <= ry:
+        dx: int = -rx
+        while dx <= rx:
+            norm: float = float(dx * dx) / rx2 + float(dy * dy) / ry2
+            if norm <= 1.0:
+                canvas.blend_pixel(cx + dx, cy + dy, color)
+            dx = dx + 1
+        dy = dy + 1
+
+def draw_ellipse(canvas: Canvas, cx: int, cy: int, rx: int, ry: int, color: Pixel, thickness: int) -> None:
+    """Draw an axis-aligned ellipse outline centered at `(cx, cy)` with semi-axes `rx, ry` and `thickness >= 1`."""
+    if rx <= 0 or ry <= 0:
+        raise DimensionError("draw_ellipse semi-axes rx and ry must be positive")
+    if thickness < 1:
+        raise DimensionError("draw_ellipse thickness must be >= 1")
+    rx_o2: float = float(rx * rx)
+    ry_o2: float = float(ry * ry)
+    irx: int = rx - thickness
+    iry: int = ry - thickness
+    dy: int = -ry
+    while dy <= ry:
+        dx: int = -rx
+        while dx <= rx:
+            norm_o: float = float(dx * dx) / rx_o2 + float(dy * dy) / ry_o2
+            if norm_o <= 1.0:
+                inside_inner: bool = False
+                if irx > 0 and iry > 0:
+                    norm_i: float = float(dx * dx) / float(irx * irx) + float(dy * dy) / float(iry * iry)
+                    if norm_i < 1.0:
+                        inside_inner = True
+                if not inside_inner:
+                    canvas.blend_pixel(cx + dx, cy + dy, color)
+            dx = dx + 1
+        dy = dy + 1
+
+def fill_rounded_rect(canvas: Canvas, x: int, y: int, w: int, h: int, radius: int, color: Pixel) -> None:
+    """Fill a rectangle `(x, y, w, h)` with rounded corners of `radius >= 0`."""
+    if w <= 0 or h <= 0:
+        return
+    r: int = radius
+    if r < 0:
+        r = 0
+    if r * 2 > w:
+        r = w // 2
+    if r * 2 > h:
+        r = h // 2
+    if r == 0:
+        fill_rect(canvas, x, y, w, h, color)
+        return
+
+    r2: int = r * r
+    py: int = 0
+    while py < h:
+        px: int = 0
+        while px < w:
+            dx: int = 0
+            dy: int = 0
+            if px < r:
+                dx = r - 1 - px
+            elif px >= w - r:
+                dx = px - (w - r)
+            if py < r:
+                dy = r - 1 - py
+            elif py >= h - r:
+                dy = py - (h - r)
+            if dx * dx + dy * dy <= r2:
+                canvas.blend_pixel(x + px, y + py, color)
+            px = px + 1
+        py = py + 1
+
+def draw_rounded_rect(canvas: Canvas, x: int, y: int, w: int, h: int, radius: int, color: Pixel, thickness: int) -> None:
+    """Draw a stroked rounded rectangle border with corner `radius >= 0` and `thickness >= 1`."""
+    if thickness < 1:
+        raise DimensionError("draw_rounded_rect thickness must be >= 1")
+    if w <= 0 or h <= 0:
+        return
+    r_out: int = radius
+    if r_out < 0:
+        r_out = 0
+    if r_out * 2 > w:
+        r_out = w // 2
+    if r_out * 2 > h:
+        r_out = h // 2
+
+    ro2: int = r_out * r_out
+    r_in: int = r_out - thickness
+    if r_in < 0:
+        r_in = 0
+    ri2: int = r_in * r_in
+
+    py: int = 0
+    while py < h:
+        px: int = 0
+        while px < w:
+            dx_o: int = 0
+            dy_o: int = 0
+            if px < r_out:
+                dx_o = r_out - 1 - px
+            elif px >= w - r_out:
+                dx_o = px - (w - r_out)
+            if py < r_out:
+                dy_o = r_out - 1 - py
+            elif py >= h - r_out:
+                dy_o = py - (h - r_out)
+
+            if dx_o * dx_o + dy_o * dy_o <= ro2:
+                # Check if inside the inner rounded rect
+                in_inner: bool = False
+                ipx: int = px - thickness
+                ipy: int = py - thickness
+                iw: int = w - 2 * thickness
+                ih: int = h - 2 * thickness
+                if ipx >= 0 and ipy >= 0 and ipx < iw and ipy < ih:
+                    dx_i: int = 0
+                    dy_i: int = 0
+                    if ipx < r_in:
+                        dx_i = r_in - 1 - ipx
+                    elif ipx >= iw - r_in:
+                        dx_i = ipx - (iw - r_in)
+                    if ipy < r_in:
+                        dy_i = r_in - 1 - ipy
+                    elif ipy >= ih - r_in:
+                        dy_i = ipy - (ih - r_in)
+                    if dx_i * dx_i + dy_i * dy_i <= ri2:
+                        in_inner = True
+                if not in_inner:
+                    canvas.blend_pixel(x + px, y + py, color)
+            px = px + 1
+        py = py + 1
+
+def fill_polygon(canvas: Canvas, points: list[Point2D], color: Pixel) -> None:
+    """Fill a closed polygon using even-odd scanline intersection rules."""
+    n: int = len(points)
+    if n < 3:
+        raise InvalidImageError("fill_polygon requires at least 3 vertices")
+
+    min_y: int = points[0].y
+    max_y: int = points[0].y
+    i: int = 1
+    while i < n:
+        if points[i].y < min_y:
+            min_y = points[i].y
+        if points[i].y > max_y:
+            max_y = points[i].y
+        i = i + 1
+
+    if min_y < canvas.clip_y:
+        min_y = canvas.clip_y
+    if max_y >= canvas.clip_y + canvas.clip_h:
+        max_y = canvas.clip_y + canvas.clip_h - 1
+
+    y: int = min_y
+    while y <= max_y:
+        nodes: list[int] = []
+        j: int = n - 1
+        k: int = 0
+        while k < n:
+            yk: int = points[k].y
+            yj: int = points[j].y
+            xk: int = points[k].x
+            xj: int = points[j].x
+            if yk < y and yj >= y or yj < y and yk >= y:
+                ix: int = int(nox.mathx.floor(float(xk) + float(y - yk) / float(yj - yk) * float(xj - xk) + 0.5))
+                nodes.append(ix)
+            j = k
+            k = k + 1
+
+        # Insertion sort intersection nodes
+        m: int = 1
+        while m < len(nodes):
+            key: int = nodes[m]
+            p: int = m - 1
+            while p >= 0 and nodes[p] > key:
+                nodes[p + 1] = nodes[p]
+                p = p - 1
+            nodes[p + 1] = key
+            m = m + 1
+
+        pair_idx: int = 0
+        while pair_idx + 1 < len(nodes):
+            x_start: int = nodes[pair_idx]
+            x_end: int = nodes[pair_idx + 1]
+            px: int = x_start
+            while px <= x_end:
+                canvas.blend_pixel(px, y, color)
+                px = px + 1
+            pair_idx = pair_idx + 2
+        y = y + 1

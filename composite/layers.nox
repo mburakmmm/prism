@@ -1,0 +1,89 @@
+from composite.blend import BlendMode, blend_pixel_mode
+from core.errors import InvalidImageError
+from core.image import Image, MutableImage
+from core.pixel import Pixel, PixelFormat
+from transforms.resample import require_finite_float
+
+class Layer:
+    """Immutable compositing layer descriptor with offset, opacity, blend mode, and visibility."""
+
+    img: Image
+    offset_x: int
+    offset_y: int
+    opacity: float
+    blend_mode: BlendMode
+    visible: bool
+
+    def __init__(self, img: Image, offset_x: int, offset_y: int, opacity: float, blend_mode: BlendMode, visible: bool) -> None:
+        require_finite_float(opacity, "opacity")
+        if opacity < 0.0 or opacity > 1.0:
+            raise InvalidImageError("Layer opacity must be in range [0.0, 1.0]")
+        self.img = img
+        self.offset_x = offset_x
+        self.offset_y = offset_y
+        self.opacity = opacity
+        self.blend_mode = blend_mode
+        self.visible = visible
+
+    @staticmethod
+    def normal(img: Image, offset_x: int, offset_y: int, opacity: float) -> Layer:
+
+        return Layer(img, offset_x, offset_y, opacity, BlendMode.NORMAL, True)
+
+def paste_image(base: Image, overlay: Image, offset_x: int, offset_y: int, opacity: float, mode: BlendMode) -> Image:
+    """Composite `overlay` onto `base` at `(offset_x, offset_y)` with automatic bounds clipping."""
+    require_finite_float(opacity, "opacity")
+    if opacity < 0.0 or opacity > 1.0:
+        raise InvalidImageError("paste_image opacity must be in range [0.0, 1.0]")
+
+    bw: int = base.width()
+    bh: int = base.height()
+    ow: int = overlay.width()
+    oh: int = overlay.height()
+
+    out_mut: MutableImage = base.convert_format(PixelFormat.RGBA8).to_mutable()
+
+    start_x: int = offset_x
+    if start_x < 0:
+        start_x = 0
+    start_y: int = offset_y
+    if start_y < 0:
+        start_y = 0
+
+    end_x: int = offset_x + ow
+    if end_x > bw:
+        end_x = bw
+    end_y: int = offset_y + oh
+    if end_y > bh:
+        end_y = bh
+
+    y: int = start_y
+    while y < end_y:
+        sy: int = y - offset_y
+        x: int = start_x
+        while x < end_x:
+            sx: int = x - offset_x
+            dst_px: Pixel = out_mut.get_pixel(x, y)
+            src_px: Pixel = overlay.get_pixel(sx, sy)
+            out_mut.set_pixel(x, y, blend_pixel_mode(dst_px, src_px, mode, opacity))
+            x = x + 1
+        y = y + 1
+
+    res: Image = out_mut.to_image()
+    res.color_space = base.color_space
+    res.metadata = base.metadata.clone()
+    return res
+
+def composite_layers(base: Image, layers: list[Layer]) -> Image:
+    """Composite an ordered list of Layers onto `base` from bottom to top."""
+    cur: Image = base.convert_format(PixelFormat.RGBA8)
+    i: int = 0
+    while i < len(layers):
+        lyr: Layer = layers[i]
+        if lyr.visible and lyr.opacity > 0.0:
+            cur = paste_image(cur, lyr.img, lyr.offset_x, lyr.offset_y, lyr.opacity, lyr.blend_mode)
+        i = i + 1
+    res: Image = cur
+    res.color_space = base.color_space
+    res.metadata = base.metadata.clone()
+    return res

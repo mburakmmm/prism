@@ -52,8 +52,8 @@ Bu dosya, `AGENTS.md` içindeki bağlayıcı mühendislik sözleşmesini, güven
 | **v0.4.0** | **F4** | Saf NOX PNG Engine (8-bit Gray/RGB/RGBA/Palette+tRNS, RFC 1950/1951 Zlib/DEFLATE, Scanline Filters 0–4, CRC32/Adler32) | MVP Tamamlayıcı | **TAMAMLANDI** |
 | **v0.5.0** | **F5** | Color, Alpha & Metadata Hygiene (sRGB↔LinearSRGB, Straight↔Premultiplied Alpha, EXIF Orientation 1–8, Private Metadata Strip, ICC Carry) | MVP + Web Güvenliği | **TAMAMLANDI (MVP)** |
 | **v0.6.0** | **F6** | Filters, Enhancement & Pixel Kernels (Grayscale, Brightness/Contrast/Saturation/Gamma, Convolution, Gaussian, Sharpen, Sobel, Median, Morphology, Stats/SSIM/PSNR) | Web / Masaüstü | **TAMAMLANDI** |
-| **v0.7.0** | **F7** | Drawing, Text, Masks & Compositing (Porter-Duff, Blend Modes, Shapes, Antialiased Rasterizer, Iterative Flood Fill, Embedded Bitmap Font) | Programatik Üretim | **SIRADAKİ FAZ** |
-| **v0.8.0** | **F8** | Native Codec Adapters (İzole C ABI Sınırı, Opt-in JPEG & WebP Decode/Encode, `CodecUnavailableError` Fallback, Leak/CVE Harness) | Web / Backend Sürümü | PLANLANDI |
+| **v0.7.0** | **F7** | Drawing, Text, Masks & Compositing (Porter-Duff, Blend Modes, Shapes, Antialiased Rasterizer, Iterative Flood Fill, Embedded Bitmap Font) | Programatik Üretim | **TAMAMLANDI** |
+| **v0.8.0** | **F8** | Native Codec Adapters (İzole C ABI Sınırı, Opt-in JPEG & WebP Decode/Encode, `CodecUnavailableError` Fallback, Leak/CVE Harness) | Web / Backend Sürümü | **SIRADAKİ FAZ** |
 | **v0.8.5** | **F9** | Animation & Advanced Formats (`Frame`/`Animation` Modeli, GIF LZW/Disposal/Transparency/Loop, APNG & Animated WebP Pilotu) | Profesyonel | PLANLANDI |
 | **v0.9.0** | **F10** | Pipeline DAG, Planner & Tile Engine (Immutable Operasyon Grafı, Güvenli Plan Optimizasyonu, Halo/Border Hesabı, Bounded Tile Executor, Cache) | Yüksek Performans | PLANLANDI |
 | **v0.9.2** | **F11** | Streaming, Large Image & Batch Processing (`ImageReader`/`ImageWriter`, Disk Spill & Quota, Atomik Commit, `spawn` Paralel Tile/Batch) | Yüksek Performans | PLANLANDI |
@@ -375,26 +375,26 @@ Bağımlılık sırası: `v0.0.1 (F0) -> v0.1.0 (F1) -> v0.2.0 (F2) -> v0.3.0 (F
 **Hedef:** Programatik vektör/raster şekil çizimi, katman harmanlama, maskeleme ve gömülü lisanslı bitmap font ile deterministik metin üretimi.
 
 #### F7.1 — Compositing, Mask ve Blend Motoru (`composite/alpha.nox`, `composite/blend.nox`, `composite/masks.nox`, `composite/layers.nox`)
-- [ ] Porter–Duff kipleri: `SOURCE_OVER`, `DESTINATION_OVER`, `SOURCE_IN`, `SOURCE_OUT`, `XOR`, `PLUS`.
-- [ ] Blend modları: `NORMAL`, `MULTIPLY`, `SCREEN`, `OVERLAY`, `DARKEN`, `LIGHTEN`, `DIFFERENCE`.
-- [ ] 8-bit `GRAY8` maske ile `apply_mask` ve `masked_composite` (boyut uyuşmazlığında açık hata veya ölçekleme politikası).
-- [ ] Çok katmanlı `Layer` (`offset_x`, `offset_y`, `opacity`, `blend_mode`, `visible`) kompozisyonu.
+- [x] Porter–Duff kipleri: `SOURCE_OVER`, `DESTINATION_OVER`, `SOURCE_IN`, `SOURCE_OUT`, `XOR`, `PLUS`.
+- [x] Blend modları: `NORMAL`, `MULTIPLY`, `SCREEN`, `OVERLAY`, `DARKEN`, `LIGHTEN`, `DIFFERENCE`.
+- [x] 8-bit `GRAY8` maske ile `apply_mask` ve `masked_composite` (boyut uyuşmazlığında açık `DimensionError`).
+- [x] Çok katmanlı `Layer` (`offset_x`, `offset_y`, `opacity`, `blend_mode`, `visible`) kompozisyonu (`paste_image`, `composite_layers`).
 
 #### F7.2 — Şekil Çizimi ve Rasterizer (`draw/canvas.nox`, `draw/shapes.nox`, `draw/paths.nox`, `draw/rasterizer.nox`)
-- [ ] `Canvas` üzerinde `draw_line`, `draw_polyline`, `draw_rect`, `fill_rect`, `draw_rounded_rect`, `draw_circle`, `fill_circle`, `draw_ellipse`, `fill_ellipse`, `draw_polygon`, `fill_polygon`, `draw_bezier`.
-- [ ] Clipping dikdörtgeni, stroke kalınlığı, anti-aliased çizgi/kenar seçeneği.
-- [ ] Kaynak bütçeli, **iteratif** (stack overflow üretmeyen) `flood_fill(canvas, x, y, fill_pixel, tolerance)`.
+- [x] `Canvas` üzerinde `draw_line`, `draw_polyline`, `draw_rect`, `fill_rect`, `draw_rounded_rect`, `fill_rounded_rect`, `draw_circle`, `fill_circle`, `draw_ellipse`, `fill_ellipse`, `draw_polygon`, `fill_polygon`, `draw_quadratic_bezier`, `draw_cubic_bezier`.
+- [x] Clipping dikdörtgeni (`set_clip_rect`, `reset_clip`), stroke kalınlığı, anti-aliased Xiaolin Wu çizgi seçeneği (`draw_line_aa`).
+- [x] Kaynak bütçeli, **iteratif** (stack overflow üretmeyen) `flood_fill(canvas, x, y, fill_pixel, tolerance)`.
 
 #### F7.3 — Gömülü Bitmap Font ve Metin (`draw/text.nox`)
-- [ ] Kamu malı / MIT uyumlu gömülü 8x16 / 8x8 bitmap font.
-- [ ] `measure_text(text, scale, spacing) -> TextMetrics` ve `draw_text(canvas, x, y, text, color, scale, spacing)` aynı yerleşim motorunu kullanır.
-- [ ] Çok satırlı metin, hizalama (`LEFT`, `CENTER`, `RIGHT`) ve sınır kutusu hesaplama.
+- [x] Kamu malı / MIT uyumlu gömülü 8x8 ASCII bitmap font.
+- [x] `measure_text(text, scale, spacing, line_spacing) -> TextMetrics` ve `draw_text(canvas, x, y, text, color, scale, spacing, line_spacing, align)` aynı yerleşim motorunu kullanır.
+- [x] Çok satırlı metin, hizalama (`LEFT`, `CENTER`, `RIGHT`) ve sınır kutusu hesaplama.
 
 #### Faz F7 (`v0.7.0`) Çıkış Kapısı
-- [ ] Blend ve alpha edge golden testleri geçiyor.
-- [ ] Şekil geometrisi, clipping ve iteratif flood-fill sınır testleri geçiyor.
-- [ ] Metin çıktısı deterministik ve `measure_text` ile piksel-exact uyumlu.
-- [ ] Çizim hataları kaynak `Image` nesnesini bozmuyor.
+- [x] Blend ve alpha edge golden testleri geçiyor (`tests/unit/draw_composite_test.nox`).
+- [x] Şekil geometrisi, clipping ve iteratif flood-fill sınır testleri geçiyor.
+- [x] Metin çıktısı deterministik ve `measure_text` ile piksel-exact uyumlu.
+- [x] Çizim hataları kaynak `Image` nesnesini bozmuyor.
 
 ---
 
@@ -765,4 +765,35 @@ Bağımlılık sırası: `v0.0.1 (F0) -> v0.1.0 (F1) -> v0.2.0 (F2) -> v0.3.0 (F
   noxc run examples/filters.nox
   noxc run --backend qbe examples/filters.nox
   => filters-example-ok 48 48 48 48 29 255
+  ```
+
+### `v0.7.0` (Faz F7 — Drawing, Text, Masks ve Compositing) — 2026-11-21
+
+- **Derleyici & Ortam:** `noxc 2.2.38` (`/Users/melihburakmemis/.nox-lang/bin/noxc`), macOS arm64 (Apple Silicon).
+- **Çalıştırılan Doğrulama Komutları ve Çıktıları:**
+  ```text
+  noxc check prism.nox
+  noxc check --strict-spawn-shared prism.nox
+  noxc check --profile freestanding composite/*.nox draw/*.nox (9 modül)
+  => 0 type errors
+
+  noxc test
+  => png_test-ok
+  => portable_codecs_test-ok
+  => header_fuzz_test-ok: 10000 iterations, 10000 rejected cleanly
+  => resample_golden_test-ok: 120 golden cases passed
+  => color_metadata_test-ok
+  => core_pixel_test-ok: 2x2, color, ppm/pgm, 26 negative tests, 1000 random image properties passed
+  => draw_composite_test-ok
+  => facade_test-ok
+  => filters_test-ok
+  => geometry_test-ok
+  => 10 passed, 0 failed (10 total)
+
+  noxc test --backend qbe
+  => 10 passed, 0 failed (10 total)
+
+  noxc run examples/watermark.nox
+  noxc run --backend qbe examples/watermark.nox
+  => watermark-example-ok 120 64 80 8
   ```

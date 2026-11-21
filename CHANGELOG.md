@@ -2,6 +2,16 @@
 
 All notable changes to Prism are documented in this file. Prism follows Semantic Versioning (`0.x` experimental phase gates leading to `1.0.0`).
 
+## [0.7.0] — 2026-11-21 (Phase F7 Drawing, Text, Masks & Compositing)
+
+### Added
+
+- `composite/alpha.nox` & `composite/blend.nox`: Porter-Duff compositing modes (`PorterDuffMode`: `SOURCE_OVER`, `DESTINATION_OVER`, `SOURCE_IN`, `SOURCE_OUT`, `XOR`, `PLUS`) and W3C separable blend modes (`BlendMode`: `NORMAL`, `MULTIPLY`, `SCREEN`, `OVERLAY`, `DARKEN`, `LIGHTEN`, `DIFFERENCE`) with opacity support (`composite_pixel_porter_duff`, `composite_porter_duff`, `blend_pixel_mode`, `blend_images`).
+- `composite/masks.nox` & `composite/layers.nox`: 8-bit luma/gray mask compositing (`apply_mask`, `masked_composite`), bounds-clipped sub-image pasting (`paste_image`), and multi-layer composition (`Layer`, `composite_layers`).
+- `draw/canvas.nox`, `draw/rasterizer.nox`, `draw/shapes.nox`, `draw/paths.nox`: Isolated `Canvas` surface with active clipping rectangle (`set_clip_rect`, `reset_clip`), Bresenham and Xiaolin Wu anti-aliased line rasterizers (`draw_line_bresenham`, `draw_line_aa`), iterative non-recursive queue-based 4-connected `flood_fill`, shapes (`draw_line`, `draw_rect`, `fill_rect`, `draw_rounded_rect`, `fill_rounded_rect`, `draw_circle`, `fill_circle`, `draw_ellipse`, `fill_ellipse`, `fill_polygon`), and paths (`draw_polyline`, `draw_polygon`, `draw_quadratic_bezier`, `draw_cubic_bezier`).
+- `draw/text.nox`: Embedded public-domain 8x8 ASCII bitmap font with deterministic `measure_text` and `draw_text` (`TextAlign`: `LEFT`, `CENTER`, `RIGHT`; scale `1..64`; multi-line support).
+- `examples/watermark.nox` & `tests/unit/draw_composite_test.nox`: End-to-end product card + watermark badge showcase and unit/golden/clipping/isolation tests verified on both LLVM and QBE backends and under `--profile freestanding`.
+
 ## [0.6.0] — 2026-11-21 (Phase F6 Filters, Enhancement & Pixel Kernels)
 
 ### Added

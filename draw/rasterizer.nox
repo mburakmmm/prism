@@ -1,0 +1,204 @@
+import nox.mathx
+from core.color import clamp_u8
+from core.errors import InvalidImageError
+from core.pixel import Pixel
+from draw.canvas import Canvas
+
+class Point2D:
+    """2D integer coordinate pair `(x, y)`."""
+
+    x: int
+    y: int
+
+    def __init__(self, x: int, y: int) -> None:
+        self.x = x
+        self.y = y
+
+def _abs_int(v: int) -> int:
+    if v < 0:
+        return -v
+    return v
+
+def draw_line_bresenham(canvas: Canvas, x0: int, y0: int, x1: int, y1: int, color: Pixel) -> None:
+    """Draw a 1-pixel integer Bresenham line from `(x0, y0)` to `(x1, y1)` clipped to `canvas`."""
+    cx: int = x0
+    cy: int = y0
+    dx: int = _abs_int(x1 - x0)
+    sx: int = -1
+    if x0 < x1:
+        sx = 1
+    dy: int = -_abs_int(y1 - y0)
+    sy: int = -1
+    if y0 < y1:
+        sy = 1
+    err: int = dx + dy
+
+    while True:
+        canvas.blend_pixel(cx, cy, color)
+        if cx == x1 and cy == y1:
+            break
+        e2: int = 2 * err
+        if e2 >= dy:
+            if cx == x1:
+                break
+            err = err + dy
+            cx = cx + sx
+        if e2 <= dx:
+            if cy == y1:
+                break
+            err = err + dx
+            cy = cy + sy
+
+def _fpart(x: float) -> float:
+    return x - nox.mathx.floor(x)
+
+def _rfpart(x: float) -> float:
+    return 1.0 - _fpart(x)
+
+def _plot_wu(canvas: Canvas, x: int, y: int, c: float, base_color: Pixel, steep: bool) -> None:
+    if c <= 0.0:
+        return
+    a_val: int = clamp_u8(int(nox.mathx.floor(float(base_color.a) * c + 0.5)))
+    if a_val == 0:
+        return
+    px: Pixel = Pixel.rgba(base_color.r, base_color.g, base_color.b, a_val)
+    if steep:
+        canvas.blend_pixel(y, x, px)
+    else:
+        canvas.blend_pixel(x, y, px)
+
+def draw_line_aa(canvas: Canvas, x0: int, y0: int, x1: int, y1: int, color: Pixel) -> None:
+    """Draw an anti-aliased Xiaolin Wu line from `(x0, y0)` to `(x1, y1)`."""
+    if x0 == x1 and y0 == y1:
+        canvas.blend_pixel(x0, y0, color)
+        return
+    if x0 == x1 or y0 == y1:
+        draw_line_bresenham(canvas, x0, y0, x1, y1, color)
+        return
+
+    fx0: float = float(x0)
+    fy0: float = float(y0)
+    fx1: float = float(x1)
+    fy1: float = float(y1)
+
+    steep: bool = nox.mathx.abs(fy1 - fy0) > nox.mathx.abs(fx1 - fx0)
+    if steep:
+        tmp_a: float = fx0
+        fx0 = fy0
+        fy0 = tmp_a
+        tmp_b: float = fx1
+        fx1 = fy1
+        fy1 = tmp_b
+
+    if fx0 > fx1:
+        tmp_x: float = fx0
+        fx0 = fx1
+        fx1 = tmp_x
+        tmp_y: float = fy0
+        fy0 = fy1
+        fy1 = tmp_y
+
+    dx: float = fx1 - fx0
+    dy: float = fy1 - fy0
+    gradient: float = 1.0
+    if dx != 0.0:
+        gradient = dy / dx
+
+    # First endpoint
+    xend: float = nox.mathx.floor(fx0 + 0.5)
+    yend: float = fy0 + gradient * (xend - fx0)
+    xgap: float = _rfpart(fx0 + 0.5)
+    xpxl1: int = int(xend)
+    ypxl1: int = int(nox.mathx.floor(yend))
+    _plot_wu(canvas, xpxl1, ypxl1, _rfpart(yend) * xgap, color, steep)
+    _plot_wu(canvas, xpxl1, ypxl1 + 1, _fpart(yend) * xgap, color, steep)
+    intery: float = yend + gradient
+
+    # Second endpoint
+    xend2: float = nox.mathx.floor(fx1 + 0.5)
+    yend2: float = fy1 + gradient * (xend2 - fx1)
+    xgap2: float = _fpart(fx1 + 0.5)
+    xpxl2: int = int(xend2)
+    ypxl2: int = int(nox.mathx.floor(yend2))
+    _plot_wu(canvas, xpxl2, ypxl2, _rfpart(yend2) * xgap2, color, steep)
+    _plot_wu(canvas, xpxl2, ypxl2 + 1, _fpart(yend2) * xgap2, color, steep)
+
+    x: int = xpxl1 + 1
+    while x < xpxl2:
+        iy: int = int(nox.mathx.floor(intery))
+        _plot_wu(canvas, x, iy, _rfpart(intery), color, steep)
+        _plot_wu(canvas, x, iy + 1, _fpart(intery), color, steep)
+        intery = intery + gradient
+        x = x + 1
+
+def _pixel_within_tolerance(a: Pixel, b: Pixel, tol: int) -> bool:
+    return _abs_int(a.r - b.r) <= tol and _abs_int(a.g - b.g) <= tol and _abs_int(a.b - b.b) <= tol and _abs_int(a.a - b.a) <= tol
+
+def flood_fill(canvas: Canvas, seed_x: int, seed_y: int, fill_color: Pixel, tolerance: int) -> int:
+    """Iterative (non-recursive) queue-based 4-connected flood fill respecting clip bounds and tolerance in [0, 255]. Returns filled pixel count."""
+    if tolerance < 0 or tolerance > 255:
+        raise InvalidImageError("flood_fill tolerance must be in range [0, 255]")
+    if not canvas.in_clip(seed_x, seed_y):
+        return 0
+
+    w: int = canvas.width()
+    h: int = canvas.height()
+    total: int = w * h
+    seed_px: Pixel = canvas.get_pixel(seed_x, seed_y)
+    if seed_px.equals(fill_color) and tolerance == 0:
+        return 0
+
+    visited: list[int] = []
+    i: int = 0
+    while i < total:
+        visited.append(0)
+        i = i + 1
+
+    qx: list[int] = [seed_x]
+    qy: list[int] = [seed_y]
+    visited[seed_y * w + seed_x] = 1
+    head: int = 0
+    filled: int = 0
+
+    while head < len(qx):
+        cx: int = qx[head]
+        cy: int = qy[head]
+        head = head + 1
+
+        canvas.put_pixel(cx, cy, fill_color)
+        filled = filled + 1
+
+        # 4 neighbors: left, right, up, down
+        nx0: int = cx - 1
+        if canvas.in_clip(nx0, cy):
+            idx0: int = cy * w + nx0
+            if visited[idx0] == 0 and _pixel_within_tolerance(canvas.get_pixel(nx0, cy), seed_px, tolerance):
+                visited[idx0] = 1
+                qx.append(nx0)
+                qy.append(cy)
+
+        nx1: int = cx + 1
+        if canvas.in_clip(nx1, cy):
+            idx1: int = cy * w + nx1
+            if visited[idx1] == 0 and _pixel_within_tolerance(canvas.get_pixel(nx1, cy), seed_px, tolerance):
+                visited[idx1] = 1
+                qx.append(nx1)
+                qy.append(cy)
+
+        ny0: int = cy - 1
+        if canvas.in_clip(cx, ny0):
+            idx2: int = ny0 * w + cx
+            if visited[idx2] == 0 and _pixel_within_tolerance(canvas.get_pixel(cx, ny0), seed_px, tolerance):
+                visited[idx2] = 1
+                qx.append(cx)
+                qy.append(ny0)
+
+        ny1: int = cy + 1
+        if canvas.in_clip(cx, ny1):
+            idx3: int = ny1 * w + cx
+            if visited[idx3] == 0 and _pixel_within_tolerance(canvas.get_pixel(cx, ny1), seed_px, tolerance):
+                visited[idx3] = 1
+                qx.append(cx)
+                qy.append(ny1)
+
+    return filled

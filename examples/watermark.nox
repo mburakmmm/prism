@@ -1,0 +1,31 @@
+from nox.buffer import Buffer
+from prism import BlendMode, Canvas, DecodeOptions, EncodeOptions, Image, Layer, Pixel, Point2D, ResourceLimits, TextAlign, TextMetrics, composite_layers, decode_png, draw_circle, draw_line, draw_rounded_rect, draw_text, encode_png, fill_circle, fill_rounded_rect, measure_text
+
+lim: ResourceLimits = ResourceLimits.default()
+
+# 1. Create a 120x64 product card canvas with rounded border & badge
+card_canvas: Canvas = Canvas.create(120, 64, Pixel.rgba(15, 23, 42, 255), lim)
+fill_rounded_rect(card_canvas, 4, 4, 112, 56, 8, Pixel.rgba(30, 41, 59, 255))
+draw_rounded_rect(card_canvas, 4, 4, 112, 56, 8, Pixel.rgba(56, 189, 248, 255), 1)
+fill_circle(card_canvas, 22, 32, 10, Pixel.rgba(14, 165, 233, 255))
+draw_circle(card_canvas, 22, 32, 10, Pixel.rgba(224, 242, 254, 255), 1)
+draw_line(card_canvas, 40, 20, 108, 20, Pixel.rgba(148, 163, 184, 180), 1, True)
+
+base_card: Image = card_canvas.to_image()
+
+# 2. Measure and render a semi-transparent "PRISM 0.7" watermark badge layer
+wm_metrics: TextMetrics = measure_text("PRISM 0.7", 1, 1, 2)
+wm_canvas: Canvas = Canvas.create(wm_metrics.width + 8, wm_metrics.height + 6, Pixel.transparent(), lim)
+fill_rounded_rect(wm_canvas, 0, 0, wm_metrics.width + 8, wm_metrics.height + 6, 3, Pixel.rgba(2, 132, 199, 200))
+rendered_m: TextMetrics = draw_text(wm_canvas, 4, 3, "PRISM 0.7", Pixel.rgba(255, 255, 255, 255), 1, 1, 2, TextAlign.LEFT)
+assert rendered_m.width == wm_metrics.width and rendered_m.height == wm_metrics.height, "measure_text matches draw_text"
+
+wm_layer: Layer = Layer(wm_canvas.to_image(), 38, 28, 0.9, BlendMode.NORMAL, True)
+watermarked: Image = composite_layers(base_card, [wm_layer])
+
+# 3. Verify lossless PNG round-trip
+png_buf: Buffer = encode_png(watermarked, EncodeOptions.default())
+reloaded: Image = decode_png(png_buf, DecodeOptions.default())
+assert reloaded.pixel_equals(watermarked), "watermarked PNG lossless round-trip"
+
+print("watermark-example-ok", reloaded.width(), reloaded.height(), wm_metrics.width, wm_metrics.height)

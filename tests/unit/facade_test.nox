@@ -2,8 +2,8 @@ import nox.test
 from nox.buffer import Buffer
 from prism import PRISM_VERSION, DecodeOptions, DimensionError, EncodeOptions, Image, ImageView, MutableImage, Pixel, PixelFormat, ResourceLimitError, ResourceLimits, decode_ppm, encode_ppm, new_image, prism_version
 
-nox.test.assert_eq_str(PRISM_VERSION, "0.6.0", "PRISM_VERSION")
-nox.test.assert_eq_str(prism_version(), "0.6.0", "prism_version()")
+nox.test.assert_eq_str(PRISM_VERSION, "0.7.0", "PRISM_VERSION")
+nox.test.assert_eq_str(prism_version(), "0.7.0", "prism_version()")
 img: Image = new_image(4, 4, Pixel.rgba(12, 34, 56, 255))
 nox.test.assert_eq_int(img.width(), 4, "facade Image width")
 nox.test.assert_eq_int(img.height(), 4, "facade Image height")

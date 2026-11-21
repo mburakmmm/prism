@@ -1,0 +1,59 @@
+import nox.mathx
+from composite.alpha import PorterDuffMode, composite_pixel_porter_duff
+from core.color import clamp_u8
+from core.errors import DimensionError
+from core.image import Image, MutableImage
+from core.pixel import Pixel, PixelFormat
+
+def apply_mask(img: Image, mask_img: Image) -> Image:
+    """Multiply the alpha channel of `img` by the 8-bit luma/gray intensity of equal-sized `mask_img`."""
+    if img.width() != mask_img.width() or img.height() != mask_img.height():
+        raise DimensionError("apply_mask requires image and mask to have matching dimensions")
+
+    w: int = img.width()
+    h: int = img.height()
+    out_mut: MutableImage = MutableImage.create(w, h, PixelFormat.RGBA8, Pixel.transparent(), img.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            px: Pixel = img.get_pixel(x, y)
+            m_val: int = mask_img.get_pixel(x, y).luma_srgb()
+            new_a: int = clamp_u8((px.a * m_val + 127) // 255)
+            if new_a == 0:
+                out_mut.set_pixel(x, y, Pixel.transparent())
+            else:
+                out_mut.set_pixel(x, y, Pixel.rgba(px.r, px.g, px.b, new_a))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = img.color_space
+    res.metadata = img.metadata.clone()
+    return res
+
+def masked_composite(dst: Image, src: Image, mask_img: Image) -> Image:
+    """Composite `src` over `dst` modulated by 8-bit `mask_img` (`0` = dst, `255` = full src)."""
+    if dst.width() != src.width() or dst.height() != src.height():
+        raise DimensionError("masked_composite requires dst and src to have matching dimensions")
+    if dst.width() != mask_img.width() or dst.height() != mask_img.height():
+        raise DimensionError("masked_composite requires mask_img to match dst/src dimensions")
+
+    w: int = dst.width()
+    h: int = dst.height()
+    out_mut: MutableImage = MutableImage.create(w, h, PixelFormat.RGBA8, Pixel.transparent(), dst.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            d_px: Pixel = dst.get_pixel(x, y)
+            s_px: Pixel = src.get_pixel(x, y)
+            m_val: int = mask_img.get_pixel(x, y).luma_srgb()
+            mod_a: int = clamp_u8((s_px.a * m_val + 127) // 255)
+            mod_src: Pixel = Pixel.rgba(s_px.r, s_px.g, s_px.b, mod_a)
+            out_mut.set_pixel(x, y, composite_pixel_porter_duff(d_px, mod_src, PorterDuffMode.SOURCE_OVER))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = dst.color_space
+    res.metadata = dst.metadata.clone()
+    return res

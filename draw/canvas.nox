@@ -1,0 +1,105 @@
+from composite.alpha import PorterDuffMode, composite_pixel_porter_duff
+from core.errors import DimensionError
+from core.image import Image, MutableImage
+from core.limits import ResourceLimits
+from core.pixel import Pixel, PixelFormat
+
+class Canvas:
+    """Mutable 2D drawing surface with active clipping rectangle and Porter-Duff source-over blending."""
+
+    target: MutableImage
+    clip_x: int
+    clip_y: int
+    clip_w: int
+    clip_h: int
+
+    def __init__(self, target: MutableImage) -> None:
+        self.target = target
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = target.width()
+        self.clip_h = target.height()
+
+    @staticmethod
+    def create(width: int, height: int, fill: Pixel, lim: ResourceLimits) -> Canvas:
+
+        mut_img: MutableImage = MutableImage.create(width, height, PixelFormat.RGBA8, fill, lim)
+        return Canvas(mut_img)
+
+    @staticmethod
+    def from_image(img: Image) -> Canvas:
+
+        """Create an isolated drawing Canvas copied from `img`; mutating Canvas never mutates `img`."""
+        mut_img: MutableImage = img.convert_format(PixelFormat.RGBA8).to_mutable()
+        return Canvas(mut_img)
+
+    def width(self) -> int:
+
+        return self.target.width()
+
+    def height(self) -> int:
+
+        return self.target.height()
+
+    def set_clip_rect(self, x: int, y: int, w: int, h: int) -> None:
+
+        if w < 0 or h < 0:
+            raise DimensionError("clip rectangle width and height must be non-negative")
+        x0: int = x
+        y0: int = y
+        x1: int = x + w
+        y1: int = y + h
+        if x0 < 0:
+            x0 = 0
+        if y0 < 0:
+            y0 = 0
+        if x1 > self.target.width():
+            x1 = self.target.width()
+        if y1 > self.target.height():
+            y1 = self.target.height()
+        if x1 < x0:
+            x1 = x0
+        if y1 < y0:
+            y1 = y0
+        self.clip_x = x0
+        self.clip_y = y0
+        self.clip_w = x1 - x0
+        self.clip_h = y1 - y0
+
+    def reset_clip(self) -> None:
+
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = self.target.width()
+        self.clip_h = self.target.height()
+
+    def in_clip(self, x: int, y: int) -> bool:
+
+        return x >= self.clip_x and y >= self.clip_y and x < self.clip_x + self.clip_w and y < self.clip_y + self.clip_h
+
+    def get_pixel(self, x: int, y: int) -> Pixel:
+
+        return self.target.get_pixel(x, y)
+
+    def put_pixel(self, x: int, y: int, px: Pixel) -> None:
+
+        """Directly overwrite pixel `(x, y)` if inside the active clip rectangle."""
+        if self.in_clip(x, y):
+            self.target.set_pixel(x, y, px)
+
+    def blend_pixel(self, x: int, y: int, px: Pixel) -> None:
+
+        """Composite `px` onto `(x, y)` via Porter-Duff SOURCE_OVER if inside the active clip rectangle."""
+        if not self.in_clip(x, y):
+            return
+        if px.a == 0:
+            return
+        if px.a == 255:
+            self.target.set_pixel(x, y, px)
+            return
+        dst_px: Pixel = self.target.get_pixel(x, y)
+        self.target.set_pixel(x, y, composite_pixel_porter_duff(dst_px, px, PorterDuffMode.SOURCE_OVER))
+
+    def to_image(self) -> Image:
+
+        return self.target.to_image()

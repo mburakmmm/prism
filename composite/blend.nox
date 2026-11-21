@@ -1,0 +1,123 @@
+import nox.mathx
+from core.color import clamp_u8
+from core.errors import DimensionError, InvalidImageError
+from core.image import Image, MutableImage
+from core.pixel import Pixel, PixelFormat
+from transforms.resample import require_finite_float
+
+enum BlendMode:
+    NORMAL
+    MULTIPLY
+    SCREEN
+    OVERLAY
+    DARKEN
+    LIGHTEN
+    DIFFERENCE
+
+    def name(self) -> str:
+        match self:
+            case BlendMode.NORMAL:
+                return "NORMAL"
+            case BlendMode.MULTIPLY:
+                return "MULTIPLY"
+            case BlendMode.SCREEN:
+                return "SCREEN"
+            case BlendMode.OVERLAY:
+                return "OVERLAY"
+            case BlendMode.DARKEN:
+                return "DARKEN"
+            case BlendMode.LIGHTEN:
+                return "LIGHTEN"
+            case BlendMode.DIFFERENCE:
+                return "DIFFERENCE"
+
+def _blend_channel(cb: float, cs: float, mode: BlendMode) -> float:
+    match mode:
+        case BlendMode.NORMAL:
+            return cs
+        case BlendMode.MULTIPLY:
+            return cb * cs
+        case BlendMode.SCREEN:
+            return cb + cs - cb * cs
+        case BlendMode.OVERLAY:
+            if cb <= 0.5:
+                return 2.0 * cb * cs
+            return 1.0 - 2.0 * (1.0 - cb) * (1.0 - cs)
+        case BlendMode.DARKEN:
+            if cb < cs:
+                return cb
+            return cs
+        case BlendMode.LIGHTEN:
+            if cb > cs:
+                return cb
+            return cs
+        case BlendMode.DIFFERENCE:
+            return nox.mathx.abs(cb - cs)
+
+def blend_pixel_mode(dst: Pixel, src: Pixel, mode: BlendMode, opacity: float) -> Pixel:
+    """Blend `src` over `dst` using W3C Compositing & Blending separable blend mode and opacity in [0.0, 1.0]."""
+    require_finite_float(opacity, "opacity")
+    if opacity < 0.0 or opacity > 1.0:
+        raise InvalidImageError("blend opacity must be in range [0.0, 1.0]")
+
+    as_f: float = float(src.a) / 255.0 * opacity
+    if as_f <= 1.0e-7:
+        return dst
+    ad_f: float = float(dst.a) / 255.0
+    if ad_f <= 1.0e-7:
+        out_a_only: int = clamp_u8(int(nox.mathx.floor(as_f * 255.0 + 0.5)))
+        if out_a_only == 0:
+            return Pixel.transparent()
+        return Pixel.rgba(src.r, src.g, src.b, out_a_only)
+
+    out_a_f: float = as_f + ad_f * (1.0 - as_f)
+    if out_a_f <= 1.0e-7:
+        return Pixel.transparent()
+
+    rb: float = float(dst.r) / 255.0
+    gb: float = float(dst.g) / 255.0
+    bb: float = float(dst.b) / 255.0
+
+    rs: float = float(src.r) / 255.0
+    gs: float = float(src.g) / 255.0
+    bs: float = float(src.b) / 255.0
+
+    br: float = _blend_channel(rb, rs, mode)
+    bg: float = _blend_channel(gb, gs, mode)
+    bb_m: float = _blend_channel(bb, bs, mode)
+
+    # W3C formula: Co = as * (1 - ad) * Cs + as * ad * B(Cb, Cs) + (1 - as) * ad * Cb
+    cr_pre: float = as_f * (1.0 - ad_f) * rs + as_f * ad_f * br + (1.0 - as_f) * ad_f * rb
+    cg_pre: float = as_f * (1.0 - ad_f) * gs + as_f * ad_f * bg + (1.0 - as_f) * ad_f * gb
+    cb_pre: float = as_f * (1.0 - ad_f) * bs + as_f * ad_f * bb_m + (1.0 - as_f) * ad_f * bb
+
+    out_r: int = clamp_u8(int(nox.mathx.floor(cr_pre / out_a_f * 255.0 + 0.5)))
+    out_g: int = clamp_u8(int(nox.mathx.floor(cg_pre / out_a_f * 255.0 + 0.5)))
+    out_b: int = clamp_u8(int(nox.mathx.floor(cb_pre / out_a_f * 255.0 + 0.5)))
+    out_a: int = clamp_u8(int(nox.mathx.floor(out_a_f * 255.0 + 0.5)))
+    if out_a == 0:
+        return Pixel.transparent()
+    return Pixel.rgba(out_r, out_g, out_b, out_a)
+
+def blend_images(dst: Image, src: Image, mode: BlendMode, opacity: float) -> Image:
+    """Blend equal-sized `src` onto `dst` using the specified BlendMode and opacity in [0.0, 1.0]."""
+    require_finite_float(opacity, "opacity")
+    if opacity < 0.0 or opacity > 1.0:
+        raise InvalidImageError("blend opacity must be in range [0.0, 1.0]")
+    if dst.width() != src.width() or dst.height() != src.height():
+        raise DimensionError("blend_images requires matching image dimensions")
+
+    w: int = dst.width()
+    h: int = dst.height()
+    out_mut: MutableImage = MutableImage.create(w, h, PixelFormat.RGBA8, Pixel.transparent(), dst.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            out_mut.set_pixel(x, y, blend_pixel_mode(dst.get_pixel(x, y), src.get_pixel(x, y), mode, opacity))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = dst.color_space
+    res.metadata = dst.metadata.clone()
+    return res

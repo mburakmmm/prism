@@ -1,0 +1,259 @@
+import nox.bytes
+from core.errors import DimensionError
+from core.pixel import Pixel
+from draw.canvas import Canvas
+
+enum TextAlign:
+    LEFT
+    CENTER
+    RIGHT
+
+    def name(self) -> str:
+        match self:
+            case TextAlign.LEFT:
+                return "LEFT"
+            case TextAlign.CENTER:
+                return "CENTER"
+            case TextAlign.RIGHT:
+                return "RIGHT"
+
+class TextMetrics:
+    """Measured pixel bounding box and line count for bitmap text layout."""
+
+    width: int
+    height: int
+    line_count: int
+    glyph_width: int
+    glyph_height: int
+
+    def __init__(self, width: int, height: int, line_count: int, glyph_width: int, glyph_height: int) -> None:
+        self.width = width
+        self.height = height
+        self.line_count = line_count
+        self.glyph_width = glyph_width
+        self.glyph_height = glyph_height
+
+def _glyph_rows_8x8(code: int) -> list[int]:
+    """Return 8 row bitmasks (MSB = left pixel bit 7) for printable ASCII 32..126 in Prism's public-domain 8x8 font."""
+    c: int = code
+    if c >= 97 and c <= 122:
+        # Map lowercase ASCII to clean uppercase small-cap 8x8 glyphs or distinct lowercase
+        pass
+    if c == 32:
+        return [0, 0, 0, 0, 0, 0, 0, 0]
+    if c == 33:  # !
+        return [24, 60, 60, 24, 24, 0, 24, 0]
+    if c == 34:  # "
+        return [102, 102, 36, 0, 0, 0, 0, 0]
+    if c == 35:  # #
+        return [108, 108, 254, 108, 254, 108, 108, 0]
+    if c == 36:  # $
+        return [24, 62, 96, 60, 6, 124, 24, 0]
+    if c == 37:  # %
+        return [0, 198, 204, 24, 48, 102, 198, 0]
+    if c == 38:  # &
+        return [56, 108, 56, 118, 220, 204, 118, 0]
+    if c == 39:  # '
+        return [24, 24, 48, 0, 0, 0, 0, 0]
+    if c == 40:  # (
+        return [12, 24, 48, 48, 48, 24, 12, 0]
+    if c == 41:  # )
+        return [48, 24, 12, 12, 12, 24, 48, 0]
+    if c == 42:  # *
+        return [0, 102, 60, 255, 60, 102, 0, 0]
+    if c == 43:  # +
+        return [0, 24, 24, 126, 24, 24, 0, 0]
+    if c == 44:  # ,
+        return [0, 0, 0, 0, 0, 24, 24, 48]
+    if c == 45:  # -
+        return [0, 0, 0, 126, 0, 0, 0, 0]
+    if c == 46:  # .
+        return [0, 0, 0, 0, 0, 24, 24, 0]
+    if c == 47:  # /
+        return [6, 12, 24, 48, 96, 192, 128, 0]
+    if c == 48:  # 0
+        return [60, 102, 110, 118, 102, 102, 60, 0]
+    if c == 49:  # 1
+        return [24, 56, 24, 24, 24, 24, 126, 0]
+    if c == 50:  # 2
+        return [60, 102, 6, 28, 48, 102, 126, 0]
+    if c == 51:  # 3
+        return [60, 102, 6, 28, 6, 102, 60, 0]
+    if c == 52:  # 4
+        return [12, 28, 60, 108, 126, 12, 30, 0]
+    if c == 53:  # 5
+        return [126, 96, 124, 6, 6, 102, 60, 0]
+    if c == 54:  # 6
+        return [28, 48, 96, 124, 102, 102, 60, 0]
+    if c == 55:  # 7
+        return [126, 102, 6, 12, 24, 24, 24, 0]
+    if c == 56:  # 8
+        return [60, 102, 102, 60, 102, 102, 60, 0]
+    if c == 57:  # 9
+        return [60, 102, 102, 62, 6, 12, 56, 0]
+    if c == 58:  # :
+        return [0, 24, 24, 0, 0, 24, 24, 0]
+    if c == 59:  # ;
+        return [0, 24, 24, 0, 0, 24, 24, 48]
+    if c == 60:  # <
+        return [12, 24, 48, 96, 48, 24, 12, 0]
+    if c == 61:  # =
+        return [0, 0, 126, 0, 0, 126, 0, 0]
+    if c == 62:  # >
+        return [96, 48, 24, 12, 24, 48, 96, 0]
+    if c == 63:  # ?
+        return [60, 102, 12, 24, 24, 0, 24, 0]
+    if c == 64:  # @
+        return [124, 198, 222, 222, 222, 192, 120, 0]
+    if c == 65 or c == 97:  # A/a
+        return [24, 60, 102, 102, 126, 102, 102, 0]
+    if c == 66 or c == 98:  # B/b
+        return [124, 102, 102, 124, 102, 102, 124, 0]
+    if c == 67 or c == 99:  # C/c
+        return [60, 102, 96, 96, 96, 102, 60, 0]
+    if c == 68 or c == 100:  # D/d
+        return [120, 108, 102, 102, 102, 108, 120, 0]
+    if c == 69 or c == 101:  # E/e
+        return [126, 96, 96, 120, 96, 96, 126, 0]
+    if c == 70 or c == 102:  # F/f
+        return [126, 96, 96, 120, 96, 96, 96, 0]
+    if c == 71 or c == 103:  # G/g
+        return [60, 102, 96, 110, 102, 102, 62, 0]
+    if c == 72 or c == 104:  # H/h
+        return [102, 102, 102, 126, 102, 102, 102, 0]
+    if c == 73 or c == 105:  # I/i
+        return [60, 24, 24, 24, 24, 24, 60, 0]
+    if c == 74 or c == 106:  # J/j
+        return [30, 12, 12, 12, 108, 108, 56, 0]
+    if c == 75 or c == 107:  # K/k
+        return [102, 108, 120, 112, 120, 108, 102, 0]
+    if c == 76 or c == 108:  # L/l
+        return [96, 96, 96, 96, 96, 96, 126, 0]
+    if c == 77 or c == 109:  # M/m
+        return [198, 238, 254, 214, 198, 198, 198, 0]
+    if c == 78 or c == 110:  # N/n
+        return [102, 118, 126, 126, 110, 102, 102, 0]
+    if c == 79 or c == 111:  # O/o
+        return [60, 102, 102, 102, 102, 102, 60, 0]
+    if c == 80 or c == 112:  # P/p
+        return [124, 102, 102, 124, 96, 96, 96, 0]
+    if c == 81 or c == 113:  # Q/q
+        return [60, 102, 102, 102, 106, 108, 54, 0]
+    if c == 82 or c == 114:  # R/r
+        return [124, 102, 102, 124, 108, 102, 102, 0]
+    if c == 83 or c == 115:  # S/s
+        return [60, 102, 96, 60, 6, 102, 60, 0]
+    if c == 84 or c == 116:  # T/t
+        return [126, 24, 24, 24, 24, 24, 24, 0]
+    if c == 85 or c == 117:  # U/u
+        return [102, 102, 102, 102, 102, 102, 60, 0]
+    if c == 86 or c == 118:  # V/v
+        return [102, 102, 102, 102, 102, 60, 24, 0]
+    if c == 87 or c == 119:  # W/w
+        return [198, 198, 198, 214, 254, 238, 198, 0]
+    if c == 88 or c == 120:  # X/x
+        return [102, 102, 60, 24, 60, 102, 102, 0]
+    if c == 89 or c == 121:  # Y/y
+        return [102, 102, 102, 60, 24, 24, 24, 0]
+    if c == 90 or c == 122:  # Z/z
+        return [126, 6, 12, 24, 48, 96, 126, 0]
+    if c == 95:  # _
+        return [0, 0, 0, 0, 0, 0, 255, 0]
+    # Default fallback box glyph for unknown character codes
+    return [126, 66, 66, 66, 66, 66, 126, 0]
+
+def _split_lines_bytes(text: str) -> list[list[int]]:
+    raw: list[int] = nox.bytes.to_list(nox.bytes.from_str(text))
+    lines: list[list[int]] = []
+    cur: list[int] = []
+    i: int = 0
+    while i < len(raw):
+        b: int = raw[i]
+        if b == 13:
+            # Ignore CR in CRLF
+            i = i + 1
+            continue
+        if b == 10:
+            lines.append(cur)
+            cur = []
+        else:
+            cur.append(b)
+        i = i + 1
+    lines.append(cur)
+    return lines
+
+def _measure_line_px(num_chars: int, scale: int, spacing: int) -> int:
+    if num_chars <= 0:
+        return 0
+    return num_chars * (8 * scale) + (num_chars - 1) * spacing
+
+def measure_text(text: str, scale: int, spacing: int, line_spacing: int) -> TextMetrics:
+    """Measure the exact pixel bounding box `(width, height)` of `text` using the embedded 8x8 bitmap font."""
+    if scale < 1 or scale > 64:
+        raise DimensionError("measure_text scale must be in range [1, 64]")
+    if spacing < 0 or line_spacing < 0:
+        raise DimensionError("measure_text spacing and line_spacing must be non-negative")
+
+    gw: int = 8 * scale
+    gh: int = 8 * scale
+    if len(text) == 0:
+        return TextMetrics(0, 0, 0, gw, gh)
+
+    lines: list[list[int]] = _split_lines_bytes(text)
+    max_w: int = 0
+    i: int = 0
+    while i < len(lines):
+        lw: int = _measure_line_px(len(lines[i]), scale, spacing)
+        if lw > max_w:
+            max_w = lw
+        i = i + 1
+
+    num_lines: int = len(lines)
+    total_h: int = num_lines * gh + (num_lines - 1) * line_spacing
+    return TextMetrics(max_w, total_h, num_lines, gw, gh)
+
+def draw_text(canvas: Canvas, x: int, y: int, text: str, color: Pixel, scale: int, spacing: int, line_spacing: int, align: TextAlign) -> TextMetrics:
+    """Render `text` at `(x, y)` using the embedded 8x8 bitmap font and return the exact `TextMetrics` rendered."""
+    metrics: TextMetrics = measure_text(text, scale, spacing, line_spacing)
+    if metrics.line_count == 0 or metrics.width == 0:
+        return metrics
+
+    lines: list[list[int]] = _split_lines_bytes(text)
+    gw: int = 8 * scale
+    gh: int = 8 * scale
+
+    line_idx: int = 0
+    while line_idx < len(lines):
+        line_codes: list[int] = lines[line_idx]
+        line_w: int = _measure_line_px(len(line_codes), scale, spacing)
+        line_x: int = x
+        if align == TextAlign.CENTER:
+            line_x = x + (metrics.width - line_w) // 2
+        elif align == TextAlign.RIGHT:
+            line_x = x + (metrics.width - line_w)
+        line_y: int = y + line_idx * (gh + line_spacing)
+
+        ch_idx: int = 0
+        while ch_idx < len(line_codes):
+            gx0: int = line_x + ch_idx * (gw + spacing)
+            rows: list[int] = _glyph_rows_8x8(line_codes[ch_idx])
+            ry: int = 0
+            while ry < 8:
+                row_mask: int = rows[ry]
+                rx: int = 0
+                while rx < 8:
+                    bit: int = row_mask >> 7 - rx & 1
+                    if bit == 1:
+                        sy: int = 0
+                        while sy < scale:
+                            sx: int = 0
+                            while sx < scale:
+                                canvas.blend_pixel(gx0 + rx * scale + sx, line_y + ry * scale + sy, color)
+                                sx = sx + 1
+                            sy = sy + 1
+                    rx = rx + 1
+                ry = ry + 1
+            ch_idx = ch_idx + 1
+        line_idx = line_idx + 1
+
+    return metrics

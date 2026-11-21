@@ -1,0 +1,181 @@
+import nox.test
+from prism import BlendMode, Canvas, DimensionError, Image, InvalidImageError, Layer, Pixel, PixelFormat, Point2D, PorterDuffMode, ResourceLimits, TextAlign, TextMetrics, apply_mask, blend_images, blend_pixel_mode, composite_layers, composite_pixel_porter_duff, composite_porter_duff, draw_circle, draw_cubic_bezier, draw_ellipse, draw_line, draw_polygon, draw_polyline, draw_quadratic_bezier, draw_rect, draw_rounded_rect, draw_text, fill_circle, fill_ellipse, fill_polygon, fill_rect, fill_rounded_rect, flood_fill, masked_composite, measure_text, new_image, paste_image
+
+def test_porter_duff_blend_modes_masks_and_layers() -> None:
+    dst_px: Pixel = Pixel.rgba(0, 200, 0, 255)
+    src_px: Pixel = Pixel.rgba(200, 0, 0, 128)
+
+    # 1. Porter-Duff modes
+    so_px: Pixel = composite_pixel_porter_duff(dst_px, src_px, PorterDuffMode.SOURCE_OVER)
+    nox.test.assert_eq_int(so_px.a, 255, "SOURCE_OVER on opaque dst stays opaque")
+    nox.test.assert_true(so_px.r > 95 and so_px.g > 95, "SOURCE_OVER mixes red and green")
+
+    do_px: Pixel = composite_pixel_porter_duff(dst_px, src_px, PorterDuffMode.DESTINATION_OVER)
+    nox.test.assert_true(do_px.equals(dst_px), "DESTINATION_OVER behind opaque dst leaves dst unchanged")
+
+    si_px: Pixel = composite_pixel_porter_duff(Pixel.transparent(), src_px, PorterDuffMode.SOURCE_IN)
+    nox.test.assert_eq_int(si_px.a, 0, "SOURCE_IN with transparent dst produces transparent pixel")
+
+    sout_px: Pixel = composite_pixel_porter_duff(dst_px, src_px, PorterDuffMode.SOURCE_OUT)
+    nox.test.assert_eq_int(sout_px.a, 0, "SOURCE_OUT with opaque dst produces transparent pixel")
+
+    xor_px: Pixel = composite_pixel_porter_duff(Pixel.rgba(255, 0, 0, 255), Pixel.rgba(0, 255, 0, 255), PorterDuffMode.XOR)
+    nox.test.assert_eq_int(xor_px.a, 0, "XOR of two opaque pixels produces alpha 0")
+
+    plus_px: Pixel = composite_pixel_porter_duff(Pixel.rgba(100, 50, 20, 255), Pixel.rgba(80, 120, 40, 255), PorterDuffMode.PLUS)
+    nox.test.assert_true(plus_px.equals(Pixel.rgba(180, 170, 60, 255)), "PLUS additive Porter-Duff")
+
+    img_a: Image = new_image(2, 2, dst_px)
+    img_b: Image = new_image(2, 2, src_px)
+    pd_img: Image = composite_porter_duff(img_a, img_b, PorterDuffMode.SOURCE_OVER)
+    nox.test.assert_true(pd_img.get_pixel(0, 0).equals(so_px), "composite_porter_duff image level")
+
+    # 2. Separable W3C Blend Modes
+    w_px: Pixel = Pixel.rgba(200, 100, 50, 255)
+    m_px: Pixel = Pixel.rgba(128, 255, 0, 255)
+
+    mult_res: Pixel = blend_pixel_mode(w_px, m_px, BlendMode.MULTIPLY, 1.0)
+    nox.test.assert_eq_int(mult_res.g, 100, "MULTIPLY with 255 preserves channel")
+    nox.test.assert_eq_int(mult_res.b, 0, "MULTIPLY with 0 zeroes channel")
+
+    scr_res: Pixel = blend_pixel_mode(w_px, Pixel.white(), BlendMode.SCREEN, 1.0)
+    nox.test.assert_true(scr_res.equals(Pixel.white()), "SCREEN with white produces white")
+
+    drk_res: Pixel = blend_pixel_mode(w_px, m_px, BlendMode.DARKEN, 1.0)
+    nox.test.assert_true(drk_res.equals(Pixel.rgba(128, 100, 0, 255)), "DARKEN takes channel-wise minimum")
+
+    lgt_res: Pixel = blend_pixel_mode(w_px, m_px, BlendMode.LIGHTEN, 1.0)
+    nox.test.assert_true(lgt_res.equals(Pixel.rgba(200, 255, 50, 255)), "LIGHTEN takes channel-wise maximum")
+
+    dif_res: Pixel = blend_pixel_mode(w_px, w_px, BlendMode.DIFFERENCE, 1.0)
+    nox.test.assert_true(dif_res.equals(Pixel.rgba(0, 0, 0, 255)), "DIFFERENCE of identical opaque pixels is black")
+
+    ovl_res: Image = blend_images(new_image(2, 2, w_px), new_image(2, 2, m_px), BlendMode.OVERLAY, 0.5)
+    nox.test.assert_eq_int(ovl_res.get_pixel(0, 0).a, 255, "OVERLAY image blend alpha")
+
+    # 3. Masking & Layers
+    mask_c: Canvas = Canvas.create(2, 1, Pixel.gray(0), ResourceLimits.default())
+    mask_c.put_pixel(1, 0, Pixel.gray(255))
+    mask_img: Image = mask_c.to_image()
+
+    red_2x1: Image = new_image(2, 1, Pixel.rgba(255, 0, 0, 255))
+    blue_2x1: Image = new_image(2, 1, Pixel.rgba(0, 0, 255, 255))
+    masked_red: Image = apply_mask(red_2x1, mask_img)
+    nox.test.assert_eq_int(masked_red.get_pixel(0, 0).a, 0, "apply_mask 0 zeroes alpha")
+    nox.test.assert_eq_int(masked_red.get_pixel(1, 0).a, 255, "apply_mask 255 preserves alpha")
+
+    m_comp: Image = masked_composite(blue_2x1, red_2x1, mask_img)
+    nox.test.assert_true(m_comp.get_pixel(0, 0).equals(Pixel.rgba(0, 0, 255, 255)), "masked_composite mask=0 keeps dst")
+    nox.test.assert_true(m_comp.get_pixel(1, 0).equals(Pixel.rgba(255, 0, 0, 255)), "masked_composite mask=255 takes src")
+
+    base_4x4: Image = new_image(4, 4, Pixel.rgba(10, 20, 30, 255))
+    patch_2x2: Image = new_image(2, 2, Pixel.rgba(250, 100, 50, 255))
+    l1: Layer = Layer.normal(patch_2x2, 1, 1, 1.0)
+    l2_hidden: Layer = Layer(new_image(2, 2, Pixel.white()), 0, 0, 1.0, BlendMode.NORMAL, False)
+    layered: Image = composite_layers(base_4x4, [l1, l2_hidden])
+    nox.test.assert_true(layered.get_pixel(0, 0).equals(Pixel.rgba(10, 20, 30, 255)), "hidden layer ignored and outside offset untouched")
+    nox.test.assert_true(layered.get_pixel(1, 1).equals(Pixel.rgba(250, 100, 50, 255)), "visible layer pasted at (1, 1)")
+
+    # Negative off-canvas paste clipping
+    pasted_neg: Image = paste_image(base_4x4, patch_2x2, -1, -1, 1.0, BlendMode.NORMAL)
+    nox.test.assert_true(pasted_neg.get_pixel(0, 0).equals(Pixel.rgba(250, 100, 50, 255)), "paste_image clips negative offset (-1, -1) cleanly")
+
+def test_canvas_shapes_clipping_flood_fill_and_source_isolation() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+
+    # 1. Source Image isolation (F7 exit gate: drawing or drawing errors never corrupt source Image)
+    orig: Image = new_image(12, 12, Pixel.rgba(20, 30, 40, 255))
+    cv: Canvas = Canvas.from_image(orig)
+    fill_rect(cv, 0, 0, 12, 12, Pixel.rgba(255, 0, 0, 255))
+
+    err_thick: bool = False
+    try:
+        draw_line(cv, 0, 0, 5, 5, Pixel.white(), 0, False)
+    except DimensionError:
+        err_thick = True
+    nox.test.assert_true(err_thick, "draw_line thickness=0 rejected")
+    nox.test.assert_true(orig.get_pixel(0, 0).equals(Pixel.rgba(20, 30, 40, 255)), "Canvas mutation and error never mutate original Image")
+
+    # 2. Clipping rectangle enforcement
+    clip_cv: Canvas = Canvas.create(10, 10, Pixel.black(), lim)
+    clip_cv.set_clip_rect(2, 2, 4, 4)
+    fill_rect(clip_cv, 0, 0, 10, 10, Pixel.rgba(0, 255, 0, 255))
+    nox.test.assert_true(clip_cv.get_pixel(1, 1).equals(Pixel.black()), "pixel outside clip_rect untouched")
+    nox.test.assert_true(clip_cv.get_pixel(3, 3).equals(Pixel.rgba(0, 255, 0, 255)), "pixel inside clip_rect filled")
+    nox.test.assert_true(clip_cv.get_pixel(6, 6).equals(Pixel.black()), "pixel beyond clip_rect untouched")
+    clip_cv.reset_clip()
+
+    # 3. Shapes, polygons, and Bezier curves
+    sh_cv: Canvas = Canvas.create(24, 24, Pixel.black(), lim)
+    draw_rect(sh_cv, 1, 1, 22, 22, Pixel.rgba(255, 255, 0, 255), 1)
+    nox.test.assert_true(sh_cv.get_pixel(1, 1).equals(Pixel.rgba(255, 255, 0, 255)), "draw_rect corner")
+    nox.test.assert_true(sh_cv.get_pixel(12, 12).equals(Pixel.black()), "draw_rect interior stays black")
+
+    fill_circle(sh_cv, 12, 12, 4, Pixel.rgba(0, 128, 255, 255))
+    nox.test.assert_true(sh_cv.get_pixel(12, 12).equals(Pixel.rgba(0, 128, 255, 255)), "fill_circle center")
+    draw_circle(sh_cv, 12, 12, 6, Pixel.rgba(255, 0, 128, 255), 1)
+    fill_ellipse(sh_cv, 12, 12, 3, 2, Pixel.rgba(0, 255, 128, 255))
+    draw_ellipse(sh_cv, 12, 12, 5, 3, Pixel.white(), 1)
+    fill_rounded_rect(sh_cv, 2, 2, 6, 6, 2, Pixel.rgba(200, 100, 50, 255))
+    draw_rounded_rect(sh_cv, 2, 2, 6, 6, 2, Pixel.white(), 1)
+
+    poly_cv: Canvas = Canvas.create(12, 12, Pixel.black(), lim)
+    tri: list[Point2D] = [Point2D(2, 2), Point2D(9, 2), Point2D(5, 9)]
+    fill_polygon(poly_cv, tri, Pixel.rgba(255, 120, 0, 255))
+    nox.test.assert_true(poly_cv.get_pixel(5, 4).equals(Pixel.rgba(255, 120, 0, 255)), "fill_polygon interior pixel")
+    draw_polygon(poly_cv, tri, Pixel.white(), 1, False)
+    draw_polyline(poly_cv, [Point2D(0, 0), Point2D(5, 5), Point2D(11, 0)], Pixel.rgba(0, 255, 255, 255), 1, False, True)
+    draw_quadratic_bezier(poly_cv, Point2D(0, 11), Point2D(6, 0), Point2D(11, 11), Pixel.rgba(255, 0, 255, 255), 1, 16, True)
+    draw_cubic_bezier(poly_cv, Point2D(0, 6), Point2D(4, 0), Point2D(8, 11), Point2D(11, 6), Pixel.rgba(128, 255, 0, 255), 1, 16, False)
+
+    # 4. Iterative flood_fill inside a closed 8x8 box
+    ff_cv: Canvas = Canvas.create(10, 10, Pixel.black(), lim)
+    draw_rect(ff_cv, 1, 1, 8, 8, Pixel.white(), 1)
+    # Interior is 6x6 = 36 black pixels at (2..7, 2..7)
+    filled_count: int = flood_fill(ff_cv, 4, 4, Pixel.rgba(0, 200, 100, 255), 0)
+    nox.test.assert_eq_int(filled_count, 36, "iterative flood_fill fills exact 6x6=36 bounded interior pixels")
+    nox.test.assert_true(ff_cv.get_pixel(0, 0).equals(Pixel.black()), "flood_fill does not leak outside closed border")
+    nox.test.assert_true(ff_cv.get_pixel(4, 4).equals(Pixel.rgba(0, 200, 100, 255)), "flood_fill interior color")
+
+def test_embedded_bitmap_font_measure_and_draw_text() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+
+    # Single line: 5 chars * (8*2=16px) + 4 * 2px spacing = 80 + 8 = 88px wide, 16px tall
+    m1: TextMetrics = measure_text("PRISM", 2, 2, 4)
+    nox.test.assert_eq_int(m1.width, 88, "measure_text single-line width")
+    nox.test.assert_eq_int(m1.height, 16, "measure_text single-line height")
+    nox.test.assert_eq_int(m1.line_count, 1, "measure_text line_count == 1")
+
+    # Multi-line: "HI\nNOX" at scale=1, spacing=1, line_spacing=2
+    # Line 1 ("HI"): 2*8 + 1 = 17px; Line 2 ("NOX"): 3*8 + 2 = 26px -> max_w=26, height=8*2 + 2 = 18px
+    m2: TextMetrics = measure_text("HI\nNOX", 1, 1, 2)
+    nox.test.assert_eq_int(m2.width, 26, "measure_text multi-line max width")
+    nox.test.assert_eq_int(m2.height, 18, "measure_text multi-line total height")
+    nox.test.assert_eq_int(m2.line_count, 2, "measure_text multi-line count == 2")
+
+    txt_cv: Canvas = Canvas.create(40, 24, Pixel.black(), lim)
+    drawn_m: TextMetrics = draw_text(txt_cv, 2, 2, "HI\nNOX", Pixel.rgba(255, 255, 255, 255), 1, 1, 2, TextAlign.CENTER)
+    nox.test.assert_eq_int(drawn_m.width, m2.width, "draw_text width matches measure_text")
+    nox.test.assert_eq_int(drawn_m.height, m2.height, "draw_text height matches measure_text")
+
+    # Verify non-black glyph pixels were actually plotted inside the measured box [2..2+26, 2..2+18)
+    lit_pixels: int = 0
+    outside_lit: int = 0
+    y: int = 0
+    while y < 24:
+        x: int = 0
+        while x < 40:
+            if txt_cv.get_pixel(x, y).r > 0:
+                if x >= 2 and x < 2 + m2.width and y >= 2 and y < 2 + m2.height:
+                    lit_pixels = lit_pixels + 1
+                else:
+                    outside_lit = outside_lit + 1
+            x = x + 1
+        y = y + 1
+    nox.test.assert_true(lit_pixels > 40, "draw_text plots glyph foreground pixels inside measured box")
+    nox.test.assert_eq_int(outside_lit, 0, "draw_text never plots a single pixel outside measure_text bounding box")
+
+test_porter_duff_blend_modes_masks_and_layers()
+test_canvas_shapes_clipping_flood_fill_and_source_isolation()
+test_embedded_bitmap_font_measure_and_draw_text()
+print("draw_composite_test-ok")

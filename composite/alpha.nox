@@ -1,0 +1,102 @@
+import nox.mathx
+from core.color import clamp_u8
+from core.errors import DimensionError
+from core.image import Image, MutableImage
+from core.pixel import Pixel, PixelFormat
+
+enum PorterDuffMode:
+    SOURCE_OVER
+    DESTINATION_OVER
+    SOURCE_IN
+    SOURCE_OUT
+    XOR
+    PLUS
+
+    def name(self) -> str:
+        match self:
+            case PorterDuffMode.SOURCE_OVER:
+                return "SOURCE_OVER"
+            case PorterDuffMode.DESTINATION_OVER:
+                return "DESTINATION_OVER"
+            case PorterDuffMode.SOURCE_IN:
+                return "SOURCE_IN"
+            case PorterDuffMode.SOURCE_OUT:
+                return "SOURCE_OUT"
+            case PorterDuffMode.XOR:
+                return "XOR"
+            case PorterDuffMode.PLUS:
+                return "PLUS"
+
+def composite_pixel_porter_duff(dst: Pixel, src: Pixel, mode: PorterDuffMode) -> Pixel:
+    """Composite straight-alpha `src` onto `dst` using the specified Porter-Duff mode."""
+    as_f: float = float(src.a) / 255.0
+    ad_f: float = float(dst.a) / 255.0
+
+    # Premultiplied color channels in [0.0, 255.0]
+    rs: float = float(src.r) * as_f
+    gs: float = float(src.g) * as_f
+    bs: float = float(src.b) * as_f
+
+    rd: float = float(dst.r) * ad_f
+    gd: float = float(dst.g) * ad_f
+    bd: float = float(dst.b) * ad_f
+
+    fs: float = 0.0
+    fd: float = 0.0
+    match mode:
+        case PorterDuffMode.SOURCE_OVER:
+            fs = 1.0
+            fd = 1.0 - as_f
+        case PorterDuffMode.DESTINATION_OVER:
+            fs = 1.0 - ad_f
+            fd = 1.0
+        case PorterDuffMode.SOURCE_IN:
+            fs = ad_f
+            fd = 0.0
+        case PorterDuffMode.SOURCE_OUT:
+            fs = 1.0 - ad_f
+            fd = 0.0
+        case PorterDuffMode.XOR:
+            fs = 1.0 - ad_f
+            fd = 1.0 - as_f
+        case PorterDuffMode.PLUS:
+            fs = 1.0
+            fd = 1.0
+
+    out_a_f: float = as_f * fs + ad_f * fd
+    if out_a_f > 1.0:
+        out_a_f = 1.0
+    if out_a_f <= 1.0e-7:
+        return Pixel.transparent()
+
+    out_a: int = clamp_u8(int(nox.mathx.floor(out_a_f * 255.0 + 0.5)))
+    if out_a == 0:
+        return Pixel.transparent()
+
+    out_r_pre: float = rs * fs + rd * fd
+    out_g_pre: float = gs * fs + gd * fd
+    out_b_pre: float = bs * fs + bd * fd
+
+    out_r: int = clamp_u8(int(nox.mathx.floor(out_r_pre / out_a_f + 0.5)))
+    out_g: int = clamp_u8(int(nox.mathx.floor(out_g_pre / out_a_f + 0.5)))
+    out_b: int = clamp_u8(int(nox.mathx.floor(out_b_pre / out_a_f + 0.5)))
+    return Pixel.rgba(out_r, out_g, out_b, out_a)
+
+def composite_porter_duff(dst: Image, src: Image, mode: PorterDuffMode) -> Image:
+    """Composite equal-sized `src` onto `dst` using the specified Porter-Duff mode."""
+    if dst.width() != src.width() or dst.height() != src.height():
+        raise DimensionError("composite_porter_duff requires matching image dimensions")
+    w: int = dst.width()
+    h: int = dst.height()
+    out_mut: MutableImage = MutableImage.create(w, h, PixelFormat.RGBA8, Pixel.transparent(), dst.limits)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            out_mut.set_pixel(x, y, composite_pixel_porter_duff(dst.get_pixel(x, y), src.get_pixel(x, y), mode))
+            x = x + 1
+        y = y + 1
+    res: Image = out_mut.to_image()
+    res.color_space = dst.color_space
+    res.metadata = dst.metadata.clone()
+    return res

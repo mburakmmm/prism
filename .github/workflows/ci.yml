@@ -79,6 +79,15 @@ jobs:
           noxc check --profile freestanding filters/edges.nox
           noxc check --profile freestanding filters/median.nox
           noxc check --profile freestanding filters/morphology.nox
+          noxc check --profile freestanding composite/alpha.nox
+          noxc check --profile freestanding composite/blend.nox
+          noxc check --profile freestanding composite/masks.nox
+          noxc check --profile freestanding composite/layers.nox
+          noxc check --profile freestanding draw/canvas.nox
+          noxc check --profile freestanding draw/rasterizer.nox
+          noxc check --profile freestanding draw/shapes.nox
+          noxc check --profile freestanding draw/paths.nox
+          noxc check --profile freestanding draw/text.nox
           noxc check --profile freestanding codecs/deflate.nox
           noxc check --profile freestanding codecs/sniff.nox
           noxc check --profile freestanding codecs/registry.nox
@@ -97,3 +106,4 @@ jobs:
           noxc run examples/thumbnails.nox
           noxc run examples/avatar.nox
           noxc run examples/filters.nox
+          noxc run examples/watermark.nox

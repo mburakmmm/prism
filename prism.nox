@@ -9,6 +9,10 @@ from codecs.reader import decode_bytes, probe_bytes
 from codecs.registry import CodecCapability, is_format_decode_supported, is_format_encode_supported, list_codec_capabilities
 from codecs.sniff import ImageFormat, format_from_extension, format_from_name, sniff_format
 from codecs.writer import encode_bytes, encode_to_format
+from composite.alpha import PorterDuffMode, composite_pixel_porter_duff, composite_porter_duff
+from composite.blend import BlendMode, blend_images, blend_pixel_mode
+from composite.layers import Layer, composite_layers, paste_image
+from composite.masks import apply_mask, masked_composite
 from core.color import blend_images_source_over, blend_source_over_linear, blend_source_over_straight, clamp_u8, convert_color_space, image_to_premultiplied, image_to_straight, linear_to_srgb_channel, premultiply_pixel, srgb_to_linear_channel, unpremultiply_pixel
 from core.errors import CodecUnavailableError, ColorProfileError, CorruptDataError, DecodeError, DimensionError, EncodeError, ImageIOError, InvalidImageError, NativeAdapterError, PipelineError, PrismError, ResourceLimitError, UnsupportedFormatError, UnsupportedPixelFormatError
 from core.image import Image, ImageView, MutableImage, new_image, new_image_with_format
@@ -17,6 +21,11 @@ from core.metadata import ExifSummary, ImageInfo, ImageMetadata, build_minimal_e
 from core.options import DecodeOptions, EncodeOptions
 from core.pixel import AlphaMode, ColorSpace, Pixel, PixelFormat
 from core.storage import PixelStorage
+from draw.canvas import Canvas
+from draw.paths import draw_cubic_bezier, draw_polygon, draw_polyline, draw_quadratic_bezier
+from draw.rasterizer import Point2D, draw_line_aa, draw_line_bresenham, flood_fill
+from draw.shapes import draw_circle, draw_ellipse, draw_line, draw_rect, draw_rounded_rect, fill_circle, fill_ellipse, fill_polygon, fill_rect, fill_rounded_rect
+from draw.text import TextAlign, TextMetrics, draw_text, measure_text
 from filters.convolution import MAX_KERNEL_SIZE, convolve
 from filters.edges import emboss, laplacian, prewitt, sobel
 from filters.effects import ChannelStats, average_hash, channel_histogram, compute_channel_stats, difference_hash, histogram_equalize, image_mae, image_mse, image_psnr, image_ssim, pixelate, sepia, vignette
@@ -33,7 +42,7 @@ from transforms.resample import ResampleFilter, bicubic_weight, is_finite_float,
 from transforms.resize import ResizeFit, ResizeOptions, resize_exact, resize_image, resize_with_options, thumbnail
 from transforms.rotate import apply_exif_orientation, normalize_orientation, rotate90, rotate180, rotate270, rotate_arbitrary
 
-PRISM_VERSION: str = "0.6.0"
+PRISM_VERSION: str = "0.7.0"
 
 def prism_version() -> str:
     """Return the active Prism semantic version string."""

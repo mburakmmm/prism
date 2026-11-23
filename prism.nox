@@ -2,12 +2,15 @@ from adapters.file import open_image, open_image_confined, probe_file, save_imag
 from adapters.memory import decode, encode, probe
 from codecs.bmp import decode_bmp, encode_bmp, open_bmp, probe_bmp, save_bmp
 from codecs.deflate import adler32_bytes, crc32_bytes, crc32_span, zlib_compress, zlib_decompress
+from codecs.jpeg_adapter import JpegSubsampling, decode_jpeg, encode_jpeg, is_native_jpeg_available, probe_jpeg, validate_jpeg_encode_options
 from codecs.pgm import decode_pgm, encode_pgm, open_pgm, probe_pgm, save_pgm
 from codecs.png import decode_png, encode_png, open_png, paeth_predictor, probe_png, save_png
 from codecs.ppm import decode_ppm, encode_ppm, open_ppm, probe_ppm, save_ppm
 from codecs.reader import decode_bytes, probe_bytes
 from codecs.registry import CodecCapability, is_format_decode_supported, is_format_encode_supported, list_codec_capabilities
 from codecs.sniff import ImageFormat, format_from_extension, format_from_name, sniff_format
+from codecs.tiff_adapter import decode_tiff, encode_tiff, is_native_tiff_available, probe_tiff
+from codecs.webp_adapter import decode_webp, encode_webp, is_native_webp_available, probe_webp, validate_webp_encode_options
 from codecs.writer import encode_bytes, encode_to_format
 from composite.alpha import PorterDuffMode, composite_pixel_porter_duff, composite_porter_duff
 from composite.blend import BlendMode, blend_images, blend_pixel_mode
@@ -42,7 +45,7 @@ from transforms.resample import ResampleFilter, bicubic_weight, is_finite_float,
 from transforms.resize import ResizeFit, ResizeOptions, resize_exact, resize_image, resize_with_options, thumbnail
 from transforms.rotate import apply_exif_orientation, normalize_orientation, rotate90, rotate180, rotate270, rotate_arbitrary
 
-PRISM_VERSION: str = "0.7.0"
+PRISM_VERSION: str = "0.8.0"
 
 def prism_version() -> str:
     """Return the active Prism semantic version string."""

@@ -2,6 +2,17 @@
 
 All notable changes to Prism are documented in this file. Prism follows Semantic Versioning (`0.x` experimental phase gates leading to `1.0.0`).
 
+## [0.8.0] — 2026-11-23 (Phase F8 Optional Native Codec Adapters & Pure-NOX Header Probing)
+
+### Added
+
+- `native/include/prism_native_abi.h` & `native/README.md`: Isolated C ABI boundary (`PRISM_NATIVE_ABI_VERSION = 1`) defining `PrismNativeStatus`, `PrismNativeLimits`, fixed 256-byte `PrismNativeError`, matched `PrismNativeBuffer` + `free_fn` deallocator semantics, and JPEG/WebP/TIFF C entrypoints without coupling the default `"source": "nox"` core.
+- `docs/native-adapters.md`: Third-party library license matrix (`libjpeg-turbo` IJG/BSD-3-Clause/zlib, `libwebp` BSD-3-Clause, `libtiff` BSD-like), ABI isolation rules, CVE hygiene, and platform distribution matrix.
+- `core/options.nox`: Added `EncodeOptions.with_quality`, `EncodeOptions.jpeg_default`, and `EncodeOptions.webp_default` convenience factories.
+- `codecs/jpeg_adapter.nox`, `codecs/webp_adapter.nox`, `codecs/tiff_adapter.nox`: Freestanding-compatible pure-NOX container probers (`probe_jpeg` with SOF0–SOF15 parsing & `APP1` EXIF orientation extraction; `probe_webp` covering `VP8 `, `VP8L`, and `VP8X`; `probe_tiff` supporting `II*\0`/`MM\0*` IFD0 tags and cyclic-IFD defense) plus `ResourceLimits`/`EncodeOptions` validation (`JpegSubsampling`, `quality`, `lossless`) and deterministic `CodecUnavailableError` fallback when native backends are absent.
+- `codecs/registry.nox`, `codecs/reader.nox`, `codecs/writer.nox`, `prism.nox`: Wired JPEG, WebP, and TIFF probing, decoding, and encoding into `probe`, `decode`, `encode`, and `list_codec_capabilities`.
+- `tests/codecs/native_adapters_test.nox`: Full unit, limit, corruption, and capability test suite covering JPEG, WebP, and TIFF adapters on LLVM and QBE backends.
+
 ## [0.7.0] — 2026-11-21 (Phase F7 Drawing, Text, Masks & Compositing)
 
 ### Added

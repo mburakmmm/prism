@@ -91,6 +91,9 @@ jobs:
           noxc check --profile freestanding codecs/deflate.nox
           noxc check --profile freestanding codecs/sniff.nox
           noxc check --profile freestanding codecs/registry.nox
+          noxc check --profile freestanding codecs/jpeg_adapter.nox
+          noxc check --profile freestanding codecs/webp_adapter.nox
+          noxc check --profile freestanding codecs/tiff_adapter.nox
 
       - name: Run Full Automated Test & Fuzz Suite (LLVM Backend)
         run: noxc test

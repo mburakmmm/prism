@@ -1,0 +1,102 @@
+from nox.buffer import Buffer
+from core.errors import CodecUnavailableError, CorruptDataError, InvalidImageError
+from core.image import Image
+from core.metadata import ImageInfo, ImageMetadata
+from core.options import DecodeOptions, EncodeOptions
+from core.pixel import AlphaMode, ColorSpace, PixelFormat
+
+__all__: list[str] = ["is_native_webp_available", "validate_webp_encode_options", "probe_webp", "decode_webp", "encode_webp"]
+
+def is_native_webp_available() -> bool:
+    """Return True if the optional native WebP C ABI backend is linked in this build."""
+    return False
+
+def validate_webp_encode_options(opt: EncodeOptions) -> None:
+    """Validate WebP encoding quality and option bounds."""
+    if opt.quality < 1 or opt.quality > 100:
+        raise InvalidImageError("WebP quality must be in range [1, 100]")
+
+def _u16_le(data: Buffer, offset: int) -> int:
+    return int(data.get(offset)) | int(data.get(offset + 1)) << 8
+
+def _u24_le(data: Buffer, offset: int) -> int:
+    return int(data.get(offset)) | int(data.get(offset + 1)) << 8 | int(data.get(offset + 2)) << 16
+
+def _u32_le(data: Buffer, offset: int) -> int:
+    return (int(data.get(offset)) | int(data.get(offset + 1)) << 8 | int(data.get(offset + 2)) << 16 | int(data.get(offset + 3)) << 24) & 4294967295
+
+def probe_webp(data: Buffer, opt: DecodeOptions) -> ImageInfo:
+    """Validate and probe a WebP RIFF container (VP8/VP8L/VP8X) in pure Nox without decoding full pixels."""
+    opt.limits.validate_input_size(data.len())
+    total: int = data.len()
+    if total < 20:
+        raise CorruptDataError("WebP data is too short (< 20 bytes)")
+
+    # RIFF....WEBP
+    if int(data.get(0)) != 82 or int(data.get(1)) != 73 or int(data.get(2)) != 70 or int(data.get(3)) != 70:
+        raise CorruptDataError("invalid WebP RIFF signature")
+    if int(data.get(8)) != 87 or int(data.get(9)) != 69 or int(data.get(10)) != 66 or int(data.get(11)) != 80:
+        raise CorruptDataError("invalid WebP FOURCC signature")
+
+    c0: int = int(data.get(12))
+    c1: int = int(data.get(13))
+    c2: int = int(data.get(14))
+    c3: int = int(data.get(15))
+
+    w: int = 0
+    h: int = 0
+    has_alpha: bool = False
+
+    # "VP8 " (86, 80, 56, 32)
+    if c0 == 86 and c1 == 80 and c2 == 56 and c3 == 32:
+        if total < 30:
+            raise CorruptDataError("truncated WebP VP8 lossy header")
+        # VP8 keyframe start code 0x9D 0x01 0x2A at byte 23..25
+        if int(data.get(23)) != 157 or int(data.get(24)) != 1 or int(data.get(25)) != 42:
+            raise CorruptDataError("invalid WebP VP8 bitstream start code")
+        w = _u16_le(data, 26) & 16383
+        h = _u16_le(data, 28) & 16383
+    elif c0 == 86 and c1 == 80 and c2 == 56 and c3 == 76:
+        # "VP8L" (86, 80, 56, 76)
+        if total < 25:
+            raise CorruptDataError("truncated WebP VP8L lossless header")
+        if int(data.get(20)) != 47:
+            raise CorruptDataError("invalid WebP VP8L signature byte (expected 0x2F)")
+        bits: int = _u32_le(data, 21)
+        w = (bits & 16383) + 1
+        h = (bits >> 14 & 16383) + 1
+        has_alpha = bits >> 28 & 1 == 1
+    elif c0 == 86 and c1 == 80 and c2 == 56 and c3 == 88:
+        # "VP8X" (86, 80, 56, 88)
+        if total < 30:
+            raise CorruptDataError("truncated WebP VP8X extended header")
+        flags: int = int(data.get(20))
+        has_alpha = flags & 16 != 0
+        w = _u24_le(data, 24) + 1
+        h = _u24_le(data, 27) + 1
+    else:
+        raise CorruptDataError("unrecognized WebP primary chunk FourCC")
+
+    fmt: PixelFormat = PixelFormat.RGB8
+    amode: AlphaMode = AlphaMode.OPAQUE
+    if has_alpha:
+        fmt = PixelFormat.RGBA8
+        amode = AlphaMode.STRAIGHT
+
+    opt.limits.validate_dimensions(w, h, fmt.bytes_per_pixel())
+    return ImageInfo(w, h, fmt, ColorSpace.SRGB, amode, 1, "WEBP", ImageMetadata.default())
+
+def decode_webp(data: Buffer, opt: DecodeOptions) -> Image:
+    """Validate WebP headers/limits in pure Nox and invoke the optional native WebP decoder when linked."""
+    info: ImageInfo = probe_webp(data, opt)
+    if not is_native_webp_available():
+        raise CodecUnavailableError("WebP decode (" + str(info.width) + "x" + str(info.height) + ") requires optional native WebP adapter (libwebp C ABI not linked)")
+    raise CodecUnavailableError("native WebP adapter unavailable")
+
+def encode_webp(img: Image, opt: EncodeOptions) -> Buffer:
+    """Validate WebP encoding options and ResourceLimits, then invoke the optional native WebP encoder when linked."""
+    validate_webp_encode_options(opt)
+    opt.limits.validate_dimensions(img.width(), img.height(), img.bytes_per_pixel())
+    if not is_native_webp_available():
+        raise CodecUnavailableError("WebP encode requires optional native WebP adapter (libwebp C ABI not linked)")
+    raise CodecUnavailableError("native WebP adapter unavailable")

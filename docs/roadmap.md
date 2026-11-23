@@ -2,7 +2,7 @@
 
 > **Binding Contract:** [AGENTS.md](../AGENTS.md) §25–§26  
 > **Live Task Checklist:** [todo.md](../todo.md)  
-> **Last Updated:** 2026-11-21
+> **Last Updated:** 2026-11-23
 
 | Phase / Version | Feature / Milestone | Status | `noxc_version` | Target Platforms | Tests | Benchmarks | Known Limits | Date |
 |---|---|---|---|---|---|---|---|---|
@@ -14,8 +14,8 @@
 | **F5 (`v0.5.0`)** | Color, Alpha & Metadata Hygiene (sRGB↔Linear, Premultiplied Alpha, EXIF Orientation 1–8, Private Metadata Strip, ICC Carry) | **COMPLETED (MVP)** | `2.2.38` | macOS arm64 verified (LLVM + QBE + Freestanding color/metadata) | `tests/unit/color_metadata_test.nox` | EXIF sanitization & linear blend suite | ICC color transform gated with `ColorProfileError` | 2026-11-21 |
 | **F6 (`v0.6.0`)** | Filters, Enhancement, Convolution, Gaussian Blur, Sobel, Morphology & Image Quality Metrics (PSNR/SSIM) | **COMPLETED** | `2.2.38` | macOS arm64 verified (LLVM + QBE + Freestanding filters) | `tests/unit/filters_test.nox`, `examples/filters.nox` | 2-pass separable Gaussian blur vs 2D reference convolution + PSNR/SSIM suite | Max kernel 31x31, blur radius 32 | 2026-11-21 |
 | **F7 (`v0.7.0`)** | Drawing, Text (Embedded Bitmap Font), Masks & Porter-Duff / Blend Mode Compositing | **COMPLETED** | `2.2.38` | macOS arm64 verified (LLVM + QBE + Freestanding composite/draw) | `tests/unit/draw_composite_test.nox`, `examples/watermark.nox` | Porter-Duff, W3C blend, iterative flood_fill & 8x8 bitmap font layout suite | ASCII 8x8 embedded bitmap font | 2026-11-21 |
-| **F8 (`v0.8.0`)** | Optional Native Codec Adapters (JPEG, WebP) with C ABI Isolation & `CodecUnavailableError` Fallback | **NEXT** | `2.2.38` | Hosted Desktop Targets | Planned | Planned | Next active phase | - |
-| **F9 (`v0.8.5`)** | Animation & Multi-Frame Formats (`Frame`, `Animation`, GIF LZW/Disposal/Loop) | **PLANNED** | `2.2.38` | All targets | Planned | Planned | - | - |
+| **F8 (`v0.8.0`)** | Optional Native Codec Adapters (JPEG, WebP, TIFF) with C ABI Isolation, Pure-NOX Probers & `CodecUnavailableError` Fallback | **COMPLETED** | `2.2.38` | macOS arm64 verified (LLVM + QBE + Freestanding adapters) | `tests/codecs/native_adapters_test.nox`, `tests/fuzz/header_fuzz_test.nox` | JPEG/WebP/TIFF header probe + limit/corruption suite | Decode/encode require opt-in native shim | 2026-11-23 |
+| **F9 (`v0.8.5`)** | Animation & Multi-Frame Formats (`Frame`, `Animation`, GIF LZW/Disposal/Loop) | **NEXT** | `2.2.38` | All targets | Planned | Planned | Next active phase | - |
 | **F10 (`v0.9.0`)** | Pipeline DAG, Safe Algebraic Planner & Halo-Aware Tile Executor | **PLANNED** | `2.2.38` | All targets | Planned (1000 random DAG tests) | Planned | - | - |
 | **F11 (`v0.9.2`)** | Streaming Reader/Writer, Bounded Disk Spill & Parallel Tile/Batch Execution | **PLANNED** | `2.2.38` | Hosted targets | Planned | Planned | - | - |
 | **F12 (`v0.9.4`)** | Advanced Color/Type (`GRAY16`/`RGB16`/`RGBA16`/`RGBAF32`), PNG 16-bit/Adam7, Quantization, Dithering, CLAHE, Canny | **PLANNED** | `2.2.38` | All targets | Planned | Planned | - | - |

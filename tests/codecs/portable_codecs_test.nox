@@ -28,20 +28,33 @@ def test_magic_byte_sniffing() -> None:
     nox.test.assert_true(sniff_format(tiff_le) == ImageFormat.TIFF, "sniff TIFF LE")
     nox.test.assert_true(sniff_format(tiff_be) == ImageFormat.TIFF, "sniff TIFF BE")
 
-    # JPEG and WebP raise CodecUnavailableError when native adapter is absent
-    jpg_unavail: bool = False
+    # Truncated JPEG/WebP headers are caught cleanly by pure-Nox probers before native dispatch
+    jpg_corrupt: bool = False
     try:
         decode(jpg_buf, DecodeOptions.default())
-    except CodecUnavailableError:
-        jpg_unavail = True
-    nox.test.assert_true(jpg_unavail, "JPEG raises CodecUnavailableError without native adapter")
+    except CorruptDataError:
+        jpg_corrupt = True
+    nox.test.assert_true(jpg_corrupt, "truncated JPEG raises CorruptDataError")
+
+    webp_corrupt: bool = False
+    try:
+        probe(webp_buf, DecodeOptions.default())
+    except CorruptDataError:
+        webp_corrupt = True
+    nox.test.assert_true(webp_corrupt, "truncated WebP raises CorruptDataError")
+
+    # Valid WebP VP8L header probes cleanly and raises CodecUnavailableError on decode without native adapter
+    vp8l_buf: Buffer = nox.bytes.from_list([82, 73, 70, 70, 17, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 76, 5, 0, 0, 0, 47, 15, 192, 0, 0])
+    vp8l_info: ImageInfo = probe(vp8l_buf, DecodeOptions.default())
+    nox.test.assert_eq_int(vp8l_info.width, 16, "VP8L probe width")
+    nox.test.assert_eq_int(vp8l_info.height, 4, "VP8L probe height")
 
     webp_unavail: bool = False
     try:
-        probe(webp_buf, DecodeOptions.default())
+        decode(vp8l_buf, DecodeOptions.default())
     except CodecUnavailableError:
         webp_unavail = True
-    nox.test.assert_true(webp_unavail, "WebP raises CodecUnavailableError without native adapter")
+    nox.test.assert_true(webp_unavail, "valid WebP raises CodecUnavailableError on decode without native adapter")
 
 def test_bmp_24bit_and_32bit_roundtrips() -> None:
     lim: ResourceLimits = ResourceLimits.default()

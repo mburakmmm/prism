@@ -1,0 +1,129 @@
+from nox.buffer import Buffer
+from core.errors import CodecUnavailableError, CorruptDataError, ResourceLimitError, UnsupportedPixelFormatError
+from core.image import Image
+from core.limits import checked_add, checked_mul
+from core.metadata import ImageInfo, ImageMetadata
+from core.options import DecodeOptions, EncodeOptions
+from core.pixel import AlphaMode, ColorSpace, PixelFormat
+
+__all__: list[str] = ["is_native_tiff_available", "probe_tiff", "decode_tiff", "encode_tiff"]
+
+def is_native_tiff_available() -> bool:
+    """Return True if the optional native TIFF C ABI backend is linked in this build."""
+    return False
+
+def _tiff_u16(data: Buffer, off: int, le: bool) -> int:
+    b0: int = int(data.get(off))
+    b1: int = int(data.get(off + 1))
+    if le:
+        return b0 | b1 << 8
+    return b0 << 8 | b1
+
+def _tiff_u32(data: Buffer, off: int, le: bool) -> int:
+    b0: int = int(data.get(off))
+    b1: int = int(data.get(off + 1))
+    b2: int = int(data.get(off + 2))
+    b3: int = int(data.get(off + 3))
+    if le:
+        return (b0 | b1 << 8 | b2 << 16 | b3 << 24) & 4294967295
+    return (b0 << 24 | b1 << 16 | b2 << 8 | b3) & 4294967295
+
+def _tiff_scalar_tag_value(data: Buffer, ent_off: int, ftype: int, le: bool) -> int:
+    # Tag value stored inline in bytes +8..+12 for SHORT (3) or LONG (4)
+    if ftype == 3:
+        return _tiff_u16(data, ent_off + 8, le)
+    return _tiff_u32(data, ent_off + 8, le)
+
+def probe_tiff(data: Buffer, opt: DecodeOptions) -> ImageInfo:
+    """Validate and probe a baseline TIFF header/IFD0 in pure Nox without decoding strips/tiles."""
+    opt.limits.validate_input_size(data.len())
+    total: int = data.len()
+    if total < 8:
+        raise CorruptDataError("TIFF data is too short (< 8 bytes)")
+
+    b0: int = int(data.get(0))
+    b1: int = int(data.get(1))
+    le: bool = True
+    if b0 == 73 and b1 == 73:
+        le = True
+    elif b0 == 77 and b1 == 77:
+        le = False
+    else:
+        raise CorruptDataError("invalid TIFF byte-order mark")
+
+    if _tiff_u16(data, 2, le) != 42:
+        raise CorruptDataError("invalid TIFF magic 42")
+
+    ifd0_off: int = _tiff_u32(data, 4, le)
+    if ifd0_off < 8 or checked_add(ifd0_off, 2) > total:
+        raise CorruptDataError("invalid TIFF IFD0 offset")
+
+    num_entries: int = _tiff_u16(data, ifd0_off, le)
+    if num_entries <= 0 or num_entries > 4096:
+        raise CorruptDataError("invalid TIFF IFD0 entry count: " + str(num_entries))
+
+    entries_end: int = checked_add(checked_add(ifd0_off, 2), checked_mul(num_entries, 12))
+    if checked_add(entries_end, 4) > total:
+        raise CorruptDataError("truncated TIFF IFD0 directory entries")
+
+    # Guard against immediate cyclic IFD pointer loop on IFD0 -> IFD1
+    next_ifd: int = _tiff_u32(data, entries_end, le)
+    if next_ifd != 0 and next_ifd == ifd0_off:
+        raise CorruptDataError("cyclic TIFF IFD pointer detected")
+
+    w: int = 0
+    h: int = 0
+    samples: int = 3
+    orient: int = 1
+
+    idx: int = 0
+    while idx < num_entries:
+        ent_off: int = ifd0_off + 2 + idx * 12
+        tag: int = _tiff_u16(data, ent_off, le)
+        ftype: int = _tiff_u16(data, ent_off + 2, le)
+        fcount: int = _tiff_u32(data, ent_off + 4, le)
+
+        if tag == 256 and fcount == 1:
+            w = _tiff_scalar_tag_value(data, ent_off, ftype, le)
+        elif tag == 257 and fcount == 1:
+            h = _tiff_scalar_tag_value(data, ent_off, ftype, le)
+        elif tag == 277 and fcount == 1:
+            samples = _tiff_scalar_tag_value(data, ent_off, ftype, le)
+        elif tag == 274 and fcount == 1:
+            ov: int = _tiff_scalar_tag_value(data, ent_off, ftype, le)
+            if ov >= 1 and ov <= 8:
+                orient = ov
+        idx = idx + 1
+
+    if w <= 0 or h <= 0:
+        raise CorruptDataError("TIFF IFD0 is missing valid ImageWidth/ImageLength tags")
+
+    fmt: PixelFormat = PixelFormat.RGB8
+    amode: AlphaMode = AlphaMode.OPAQUE
+    if samples == 1:
+        fmt = PixelFormat.GRAY8
+    elif samples == 3:
+        fmt = PixelFormat.RGB8
+    elif samples == 4:
+        fmt = PixelFormat.RGBA8
+        amode = AlphaMode.STRAIGHT
+    else:
+        raise UnsupportedPixelFormatError("unsupported TIFF SamplesPerPixel count: " + str(samples))
+
+    opt.limits.validate_dimensions(w, h, fmt.bytes_per_pixel())
+    meta: ImageMetadata = ImageMetadata(orient, False, 0, True, "")
+    return ImageInfo(w, h, fmt, ColorSpace.SRGB, amode, 1, "TIFF", meta)
+
+def decode_tiff(data: Buffer, opt: DecodeOptions) -> Image:
+    """Validate TIFF headers/limits in pure Nox and invoke the optional native TIFF decoder when linked."""
+    info: ImageInfo = probe_tiff(data, opt)
+    if not is_native_tiff_available():
+        raise CodecUnavailableError("TIFF decode (" + str(info.width) + "x" + str(info.height) + ") requires optional native TIFF adapter (libtiff C ABI not linked)")
+    raise CodecUnavailableError("native TIFF adapter unavailable")
+
+def encode_tiff(img: Image, opt: EncodeOptions) -> Buffer:
+    """Validate ResourceLimits and invoke the optional native TIFF encoder when linked."""
+    opt.limits.validate_dimensions(img.width(), img.height(), img.bytes_per_pixel())
+    if not is_native_tiff_available():
+        raise CodecUnavailableError("TIFF encode requires optional native TIFF adapter (libtiff C ABI not linked)")
+    raise CodecUnavailableError("native TIFF adapter unavailable")

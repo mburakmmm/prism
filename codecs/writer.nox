@@ -1,10 +1,13 @@
 from nox.buffer import Buffer
 from codecs.bmp import encode_bmp
+from codecs.jpeg_adapter import JpegSubsampling, encode_jpeg
 from codecs.pgm import encode_pgm
 from codecs.png import encode_png
 from codecs.ppm import encode_ppm
 from codecs.sniff import ImageFormat, format_from_name
-from core.errors import CodecUnavailableError, UnsupportedFormatError
+from codecs.tiff_adapter import encode_tiff
+from codecs.webp_adapter import encode_webp
+from core.errors import UnsupportedFormatError
 from core.image import Image
 from core.options import EncodeOptions
 
@@ -24,11 +27,11 @@ def encode_to_format(img: Image, fmt: ImageFormat, opt: EncodeOptions) -> Buffer
         case ImageFormat.GIF:
             raise UnsupportedFormatError("GIF encoder lands in Phase F9")
         case ImageFormat.JPEG:
-            raise CodecUnavailableError("JPEG encoder requires optional native JPEG adapter (Phase F8)")
+            return encode_jpeg(img, opt, JpegSubsampling.S420)
         case ImageFormat.WEBP:
-            raise CodecUnavailableError("WebP encoder requires optional native WebP adapter (Phase F8)")
+            return encode_webp(img, opt)
         case ImageFormat.TIFF:
-            raise CodecUnavailableError("TIFF encoder requires optional native TIFF adapter (Phase F8)")
+            return encode_tiff(img, opt)
         case _:
             raise UnsupportedFormatError("cannot encode to UNKNOWN image format")
 

@@ -1,0 +1,391 @@
+import nox.bytes
+import nox.test
+from nox.binary import BinaryWriter
+from nox.buffer import Buffer
+from prism import CodecCapability, CodecUnavailableError, CorruptDataError, DecodeOptions, EncodeOptions, Image, ImageFormat, ImageInfo, JpegSubsampling, Pixel, ResourceLimitError, ResourceLimits, UnsupportedFormatError, decode, decode_jpeg, decode_tiff, decode_webp, encode, encode_jpeg, encode_tiff, encode_webp, is_native_jpeg_available, is_native_tiff_available, is_native_webp_available, list_codec_capabilities, new_image, probe, probe_jpeg, probe_tiff, probe_webp
+
+def _make_jpeg_sof0(w: int, h: int, comps: int) -> Buffer:
+    # SOI (FF D8) + SOF0 (FF C0) with segment length 8 + 3*comps
+    seg_len: int = 8 + comps * 3
+    buf: Buffer = Buffer(4 + seg_len)
+    bw: BinaryWriter = BinaryWriter(buf)
+    bw.write_u8(u8(255))
+    bw.write_u8(u8(216))
+    bw.write_u8(u8(255))
+    bw.write_u8(u8(192))
+    bw.write_u16_be(u16(seg_len))
+    bw.write_u8(u8(8))
+    bw.write_u16_be(u16(h))
+    bw.write_u16_be(u16(w))
+    bw.write_u8(u8(comps))
+    i: int = 0
+    while i < comps:
+        bw.write_u8(u8(i + 1))
+        bw.write_u8(u8(17))
+        bw.write_u8(u8(0))
+        i = i + 1
+    return buf
+
+def _make_jpeg_with_exif_orient(w: int, h: int, comps: int, orient: int) -> Buffer:
+    # Build SOI + APP1 ("Exif\0\0" + 26-byte MM TIFF with Orientation tag) + SOF0
+    app1_seg_len: int = 2 + 6 + 26
+    sof_seg_len: int = 8 + comps * 3
+    buf: Buffer = Buffer(2 + 2 + app1_seg_len + 2 + sof_seg_len)
+    bw: BinaryWriter = BinaryWriter(buf)
+    # SOI
+    bw.write_u8(u8(255))
+    bw.write_u8(u8(216))
+    # APP1
+    bw.write_u8(u8(255))
+    bw.write_u8(u8(225))
+    bw.write_u16_be(u16(app1_seg_len))
+    bw.write_u8(u8(69))
+    bw.write_u8(u8(120))
+    bw.write_u8(u8(105))
+    bw.write_u8(u8(102))
+    bw.write_u8(u8(0))
+    bw.write_u8(u8(0))
+    # Big-endian TIFF header + IFD0 (1 entry: Orientation)
+    bw.write_u8(u8(77))
+    bw.write_u8(u8(77))
+    bw.write_u16_be(u16(42))
+    bw.write_u32_be(u32(8))
+    bw.write_u16_be(u16(1))
+    bw.write_u16_be(u16(274))
+    bw.write_u16_be(u16(3))
+    bw.write_u32_be(u32(1))
+    bw.write_u16_be(u16(orient))
+    bw.write_u16_be(u16(0))
+    bw.write_u32_be(u32(0))
+    # SOF0
+    bw.write_u8(u8(255))
+    bw.write_u8(u8(192))
+    bw.write_u16_be(u16(sof_seg_len))
+    bw.write_u8(u8(8))
+    bw.write_u16_be(u16(h))
+    bw.write_u16_be(u16(w))
+    bw.write_u8(u8(comps))
+    i: int = 0
+    while i < comps:
+        bw.write_u8(u8(i + 1))
+        bw.write_u8(u8(17))
+        bw.write_u8(u8(0))
+        i = i + 1
+    return buf
+
+def _make_webp_vp8(w: int, h: int) -> Buffer:
+    buf: Buffer = Buffer(30)
+    bw: BinaryWriter = BinaryWriter(buf)
+    bw.write_u8(u8(82))
+    bw.write_u8(u8(73))
+    bw.write_u8(u8(70))
+    bw.write_u8(u8(70))
+    bw.write_u32_le(u32(22))
+    bw.write_u8(u8(87))
+    bw.write_u8(u8(69))
+    bw.write_u8(u8(66))
+    bw.write_u8(u8(80))
+    bw.write_u8(u8(86))
+    bw.write_u8(u8(80))
+    bw.write_u8(u8(56))
+    bw.write_u8(u8(32))
+    bw.write_u32_le(u32(10))
+    # 3-byte frame tag + 3-byte keyframe start code (0x9D 0x01 0x2A)
+    bw.write_u8(u8(0))
+    bw.write_u8(u8(0))
+    bw.write_u8(u8(0))
+    bw.write_u8(u8(157))
+    bw.write_u8(u8(1))
+    bw.write_u8(u8(42))
+    bw.write_u16_le(u16(w & 16383))
+    bw.write_u16_le(u16(h & 16383))
+    return buf
+
+def _make_webp_vp8l(w: int, h: int, has_alpha: bool) -> Buffer:
+    buf: Buffer = Buffer(25)
+    bw: BinaryWriter = BinaryWriter(buf)
+    bw.write_u8(u8(82))
+    bw.write_u8(u8(73))
+    bw.write_u8(u8(70))
+    bw.write_u8(u8(70))
+    bw.write_u32_le(u32(17))
+    bw.write_u8(u8(87))
+    bw.write_u8(u8(69))
+    bw.write_u8(u8(66))
+    bw.write_u8(u8(80))
+    bw.write_u8(u8(86))
+    bw.write_u8(u8(80))
+    bw.write_u8(u8(56))
+    bw.write_u8(u8(76))
+    bw.write_u32_le(u32(5))
+    bw.write_u8(u8(47))
+    alpha_bit: int = 0
+    if has_alpha:
+        alpha_bit = 1 << 28
+    packed: int = w - 1 & 16383 | (h - 1 & 16383) << 14 | alpha_bit
+    bw.write_u32_le(u32(packed))
+    return buf
+
+def _make_webp_vp8x(w: int, h: int, has_alpha: bool) -> Buffer:
+    buf: Buffer = Buffer(30)
+    bw: BinaryWriter = BinaryWriter(buf)
+    bw.write_u8(u8(82))
+    bw.write_u8(u8(73))
+    bw.write_u8(u8(70))
+    bw.write_u8(u8(70))
+    bw.write_u32_le(u32(22))
+    bw.write_u8(u8(87))
+    bw.write_u8(u8(69))
+    bw.write_u8(u8(66))
+    bw.write_u8(u8(80))
+    bw.write_u8(u8(86))
+    bw.write_u8(u8(80))
+    bw.write_u8(u8(56))
+    bw.write_u8(u8(88))
+    bw.write_u32_le(u32(10))
+    flags: int = 0
+    if has_alpha:
+        flags = 16
+    bw.write_u8(u8(flags))
+    bw.write_u8(u8(0))
+    bw.write_u8(u8(0))
+    bw.write_u8(u8(0))
+    wm1: int = w - 1
+    hm1: int = h - 1
+    bw.write_u8(u8(wm1 & 255))
+    bw.write_u8(u8(wm1 >> 8 & 255))
+    bw.write_u8(u8(wm1 >> 16 & 255))
+    bw.write_u8(u8(hm1 & 255))
+    bw.write_u8(u8(hm1 >> 8 & 255))
+    bw.write_u8(u8(hm1 >> 16 & 255))
+    return buf
+
+def _make_tiff_header(le: bool, w: int, h: int, samples: int, orient: int, cyclic: bool) -> Buffer:
+    # 8-byte header + 2-byte count (4 entries) + 4*12 bytes + 4-byte next IFD = 62 bytes
+    buf: Buffer = Buffer(62)
+    bw: BinaryWriter = BinaryWriter(buf)
+    if le:
+        bw.write_u8(u8(73))
+        bw.write_u8(u8(73))
+        bw.write_u16_le(u16(42))
+        bw.write_u32_le(u32(8))
+        bw.write_u16_le(u16(4))
+        # 256: ImageWidth
+        bw.write_u16_le(u16(256))
+        bw.write_u16_le(u16(4))
+        bw.write_u32_le(u32(1))
+        bw.write_u32_le(u32(w))
+        # 257: ImageLength
+        bw.write_u16_le(u16(257))
+        bw.write_u16_le(u16(4))
+        bw.write_u32_le(u32(1))
+        bw.write_u32_le(u32(h))
+        # 274: Orientation
+        bw.write_u16_le(u16(274))
+        bw.write_u16_le(u16(3))
+        bw.write_u32_le(u32(1))
+        bw.write_u16_le(u16(orient))
+        bw.write_u16_le(u16(0))
+        # 277: SamplesPerPixel
+        bw.write_u16_le(u16(277))
+        bw.write_u16_le(u16(3))
+        bw.write_u32_le(u32(1))
+        bw.write_u16_le(u16(samples))
+        bw.write_u16_le(u16(0))
+        if cyclic:
+            bw.write_u32_le(u32(8))
+        else:
+            bw.write_u32_le(u32(0))
+    else:
+        bw.write_u8(u8(77))
+        bw.write_u8(u8(77))
+        bw.write_u16_be(u16(42))
+        bw.write_u32_be(u32(8))
+        bw.write_u16_be(u16(4))
+        bw.write_u16_be(u16(256))
+        bw.write_u16_be(u16(4))
+        bw.write_u32_be(u32(1))
+        bw.write_u32_be(u32(w))
+        bw.write_u16_be(u16(257))
+        bw.write_u16_be(u16(4))
+        bw.write_u32_be(u32(1))
+        bw.write_u32_be(u32(h))
+        bw.write_u16_be(u16(274))
+        bw.write_u16_be(u16(3))
+        bw.write_u32_be(u32(1))
+        bw.write_u16_be(u16(orient))
+        bw.write_u16_be(u16(0))
+        bw.write_u16_be(u16(277))
+        bw.write_u16_be(u16(3))
+        bw.write_u32_be(u32(1))
+        bw.write_u16_be(u16(samples))
+        bw.write_u16_be(u16(0))
+        if cyclic:
+            bw.write_u32_be(u32(8))
+        else:
+            bw.write_u32_be(u32(0))
+    return buf
+
+def test_jpeg_adapter_probing_limits_and_fallback() -> None:
+    nox.test.assert_true(not is_native_jpeg_available(), "native JPEG disabled in pure-Nox build")
+    opt: DecodeOptions = DecodeOptions.default()
+
+    # Valid 16x12 RGB JPEG SOF0
+    j_rgb: Buffer = _make_jpeg_sof0(16, 12, 3)
+    info: ImageInfo = probe(j_rgb, opt)
+    nox.test.assert_eq_str(info.format_name, "JPEG", "JPEG format_name")
+    nox.test.assert_eq_int(info.width, 16, "JPEG width")
+    nox.test.assert_eq_int(info.height, 12, "JPEG height")
+    nox.test.assert_eq_int(info.channels(), 3, "JPEG RGB channels")
+
+    # Grayscale SOF0 + APP1 EXIF Orientation 6
+    j_gray: Buffer = _make_jpeg_with_exif_orient(20, 10, 1, 6)
+    g_info: ImageInfo = probe_jpeg(j_gray, opt)
+    nox.test.assert_eq_int(g_info.channels(), 1, "JPEG grayscale channels")
+    nox.test.assert_eq_int(g_info.metadata.orientation, 6, "JPEG APP1 EXIF orientation 6")
+
+    # Oversized dimensions fail with ResourceLimitError
+    j_big: Buffer = _make_jpeg_sof0(60000, 10, 3)
+    big_caught: bool = False
+    try:
+        probe_jpeg(j_big, opt)
+    except ResourceLimitError:
+        big_caught = True
+    nox.test.assert_true(big_caught, "oversized JPEG rejected by ResourceLimits")
+
+    # Truncated JPEG fails with CorruptDataError
+    trunc_caught: bool = False
+    try:
+        probe_jpeg(nox.bytes.from_list([255, 216, 255, 192, 0, 8]), opt)
+    except CorruptDataError:
+        trunc_caught = True
+    nox.test.assert_true(trunc_caught, "truncated JPEG rejected with CorruptDataError")
+
+    # decode_jpeg / decode raise CodecUnavailableError
+    dec_caught: bool = False
+    try:
+        decode_jpeg(j_rgb, opt)
+    except CodecUnavailableError:
+        dec_caught = True
+    nox.test.assert_true(dec_caught, "decode_jpeg raises CodecUnavailableError without native backend")
+
+    # encode_jpeg: lossless=True -> UnsupportedFormatError; lossless=False -> CodecUnavailableError
+    sample_img: Image = new_image(4, 4, Pixel.rgb(10, 20, 30))
+    ll_caught: bool = False
+    try:
+        encode_jpeg(sample_img, EncodeOptions.default(), JpegSubsampling.S420)
+    except UnsupportedFormatError:
+        ll_caught = True
+    nox.test.assert_true(ll_caught, "JPEG lossless=True rejected with UnsupportedFormatError")
+
+    enc_caught: bool = False
+    try:
+        encode(sample_img, "JPEG", EncodeOptions.jpeg_default(82))
+    except CodecUnavailableError:
+        enc_caught = True
+    nox.test.assert_true(enc_caught, "encode JPEG raises CodecUnavailableError without native backend")
+
+def test_webp_and_tiff_adapters_and_registry() -> None:
+    nox.test.assert_true(not is_native_webp_available(), "native WebP disabled in pure-Nox build")
+    nox.test.assert_true(not is_native_tiff_available(), "native TIFF disabled in pure-Nox build")
+    opt: DecodeOptions = DecodeOptions.default()
+    sample_img: Image = new_image(4, 4, Pixel.rgba(10, 20, 30, 200))
+
+    # WebP VP8, VP8L (alpha), VP8X (alpha)
+    w_vp8: Buffer = _make_webp_vp8(32, 24)
+    i_vp8: ImageInfo = probe_webp(w_vp8, opt)
+    nox.test.assert_eq_str(i_vp8.format_name, "WEBP", "VP8 format_name")
+    nox.test.assert_eq_int(i_vp8.width, 32, "VP8 width")
+    nox.test.assert_eq_int(i_vp8.height, 24, "VP8 height")
+    nox.test.assert_eq_int(i_vp8.channels(), 3, "VP8 RGB channels")
+
+    w_vp8l: Buffer = _make_webp_vp8l(16, 16, True)
+    i_vp8l: ImageInfo = probe(w_vp8l, opt)
+    nox.test.assert_eq_int(i_vp8l.width, 16, "VP8L width")
+    nox.test.assert_eq_int(i_vp8l.channels(), 4, "VP8L alpha channels")
+
+    w_vp8x: Buffer = _make_webp_vp8x(64, 48, True)
+    i_vp8x: ImageInfo = probe_webp(w_vp8x, opt)
+    nox.test.assert_eq_int(i_vp8x.width, 64, "VP8X width")
+    nox.test.assert_eq_int(i_vp8x.height, 48, "VP8X height")
+    nox.test.assert_eq_int(i_vp8x.channels(), 4, "VP8X alpha channels")
+
+    # Oversized VP8X rejected cleanly
+    w_big: Buffer = _make_webp_vp8x(50000, 10, False)
+    w_big_caught: bool = False
+    try:
+        probe_webp(w_big, opt)
+    except ResourceLimitError:
+        w_big_caught = True
+    nox.test.assert_true(w_big_caught, "oversized WebP rejected by ResourceLimits")
+
+    # decode/encode WebP -> CodecUnavailableError
+    w_dec_caught: bool = False
+    try:
+        decode(w_vp8, opt)
+    except CodecUnavailableError:
+        w_dec_caught = True
+    nox.test.assert_true(w_dec_caught, "decode WebP raises CodecUnavailableError")
+
+    w_enc_caught: bool = False
+    try:
+        encode_webp(sample_img, EncodeOptions.webp_default(85, True))
+    except CodecUnavailableError:
+        w_enc_caught = True
+    nox.test.assert_true(w_enc_caught, "encode_webp raises CodecUnavailableError")
+
+    # TIFF LE and BE headers
+    t_le: Buffer = _make_tiff_header(True, 40, 30, 4, 8, False)
+    it_le: ImageInfo = probe(t_le, opt)
+    nox.test.assert_eq_str(it_le.format_name, "TIFF", "TIFF LE format_name")
+    nox.test.assert_eq_int(it_le.width, 40, "TIFF LE width")
+    nox.test.assert_eq_int(it_le.height, 30, "TIFF LE height")
+    nox.test.assert_eq_int(it_le.channels(), 4, "TIFF LE RGBA channels")
+    nox.test.assert_eq_int(it_le.metadata.orientation, 8, "TIFF LE orientation 8")
+
+    t_be: Buffer = _make_tiff_header(False, 12, 8, 1, 1, False)
+    it_be: ImageInfo = probe_tiff(t_be, opt)
+    nox.test.assert_eq_int(it_be.width, 12, "TIFF BE width")
+    nox.test.assert_eq_int(it_be.channels(), 1, "TIFF BE Gray channels")
+
+    # Cyclic TIFF IFD rejected
+    t_cyc: Buffer = _make_tiff_header(True, 10, 10, 3, 1, True)
+    cyc_caught: bool = False
+    try:
+        probe_tiff(t_cyc, opt)
+    except CorruptDataError:
+        cyc_caught = True
+    nox.test.assert_true(cyc_caught, "cyclic TIFF IFD rejected with CorruptDataError")
+
+    # decode/encode TIFF -> CodecUnavailableError
+    t_dec_caught: bool = False
+    try:
+        decode_tiff(t_le, opt)
+    except CodecUnavailableError:
+        t_dec_caught = True
+    nox.test.assert_true(t_dec_caught, "decode_tiff raises CodecUnavailableError")
+
+    t_enc_caught: bool = False
+    try:
+        encode_tiff(sample_img, EncodeOptions.default())
+    except CodecUnavailableError:
+        t_enc_caught = True
+    nox.test.assert_true(t_enc_caught, "encode_tiff raises CodecUnavailableError")
+
+    # Codec capability registry reports can_probe=True, can_decode=False for JPEG/WEBP/TIFF
+    caps: list[CodecCapability] = list_codec_capabilities()
+    probed_adapters: int = 0
+    ci: int = 0
+    while ci < len(caps):
+        cap: CodecCapability = caps[ci]
+        if cap.format == ImageFormat.JPEG or cap.format == ImageFormat.WEBP or cap.format == ImageFormat.TIFF:
+            nox.test.assert_true(cap.can_probe, cap.format_name + " can_probe == True")
+            nox.test.assert_true(not cap.can_decode, cap.format_name + " can_decode == False")
+            nox.test.assert_true(not cap.can_encode, cap.format_name + " can_encode == False")
+            probed_adapters = probed_adapters + 1
+        ci = ci + 1
+    nox.test.assert_eq_int(probed_adapters, 3, "registry lists JPEG, WEBP, TIFF adapter capabilities")
+
+test_jpeg_adapter_probing_limits_and_fallback()
+test_webp_and_tiff_adapters_and_registry()
+print("native_adapters_test-ok")

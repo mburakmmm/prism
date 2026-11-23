@@ -53,8 +53,8 @@ Bu dosya, `AGENTS.md` içindeki bağlayıcı mühendislik sözleşmesini, güven
 | **v0.5.0** | **F5** | Color, Alpha & Metadata Hygiene (sRGB↔LinearSRGB, Straight↔Premultiplied Alpha, EXIF Orientation 1–8, Private Metadata Strip, ICC Carry) | MVP + Web Güvenliği | **TAMAMLANDI (MVP)** |
 | **v0.6.0** | **F6** | Filters, Enhancement & Pixel Kernels (Grayscale, Brightness/Contrast/Saturation/Gamma, Convolution, Gaussian, Sharpen, Sobel, Median, Morphology, Stats/SSIM/PSNR) | Web / Masaüstü | **TAMAMLANDI** |
 | **v0.7.0** | **F7** | Drawing, Text, Masks & Compositing (Porter-Duff, Blend Modes, Shapes, Antialiased Rasterizer, Iterative Flood Fill, Embedded Bitmap Font) | Programatik Üretim | **TAMAMLANDI** |
-| **v0.8.0** | **F8** | Native Codec Adapters (İzole C ABI Sınırı, Opt-in JPEG & WebP Decode/Encode, `CodecUnavailableError` Fallback, Leak/CVE Harness) | Web / Backend Sürümü | **SIRADAKİ FAZ** |
-| **v0.8.5** | **F9** | Animation & Advanced Formats (`Frame`/`Animation` Modeli, GIF LZW/Disposal/Transparency/Loop, APNG & Animated WebP Pilotu) | Profesyonel | PLANLANDI |
+| **v0.8.0** | **F8** | Native Codec Adapters (İzole C ABI Sınırı, Opt-in JPEG & WebP Decode/Encode, `CodecUnavailableError` Fallback, Leak/CVE Harness) | Web / Backend Sürümü | **TAMAMLANDI** |
+| **v0.8.5** | **F9** | Animation & Advanced Formats (`Frame`/`Animation` Modeli, GIF LZW/Disposal/Transparency/Loop, APNG & Animated WebP Pilotu) | Profesyonel | **SIRADAKİ FAZ** |
 | **v0.9.0** | **F10** | Pipeline DAG, Planner & Tile Engine (Immutable Operasyon Grafı, Güvenli Plan Optimizasyonu, Halo/Border Hesabı, Bounded Tile Executor, Cache) | Yüksek Performans | PLANLANDI |
 | **v0.9.2** | **F11** | Streaming, Large Image & Batch Processing (`ImageReader`/`ImageWriter`, Disk Spill & Quota, Atomik Commit, `spawn` Paralel Tile/Batch) | Yüksek Performans | PLANLANDI |
 | **v0.9.4** | **F12** | Advanced Color/Type & Pro Features (`GRAY16`/`RGB16`/`RGBA16`/`RGBAF32`, PNG 16-bit/Adam7, Quantization, Dithering, CLAHE, Canny, ICC Adapter) | Profesyonel | PLANLANDI |
@@ -403,15 +403,15 @@ Bağımlılık sırası: `v0.0.1 (F0) -> v0.1.0 (F1) -> v0.2.0 (F2) -> v0.3.0 (F
 **Hedef:** Çekirdeği native bağımlılığa mahkûm etmeden, opt-in C ABI sınırı üzerinden JPEG ve WebP desteğinin güvenli entegrasyonu.
 
 #### F8.1 — Native Adapter Sınırı ve Fallback Mimarisi (`native/`, `codecs/jpeg_adapter.nox`, `codecs/webp_adapter.nox`, `codecs/tiff_adapter.nox`)
-- [ ] `native/README.md`, `native/include/prism_native_abi.h` ve C ABI güvenlik sözleşmesi (sabit boyutlu hata kodu/mesaj yapısı, `ResourceLimits` ön kontrolü, codec-özel deallocator eşleşmesi).
-- [ ] Native adapter etkin değilken (`source: "nox"` varsayılan derlemede) JPEG/WebP/TIFF çağrılarının derleme hatası vermeden `CodecUnavailableError` fırlatması veya saf NOX baseline JPEG/WebP okuma desteğinin açık capability bayrağıyla sunulması.
-- [ ] `EncodeOptions` içinde `quality (1..100)`, `lossless`, `subsampling`, `keep_metadata` seçeneklerinin doğrulanması.
-- [ ] `docs/native-adapters.md` içinde `libjpeg-turbo` (BSD-3/IJG) ve `libwebp` (BSD-3) lisans, ABI, CVE ve platform dağıtım matrisi.
+- [x] `native/README.md`, `native/include/prism_native_abi.h` ve C ABI güvenlik sözleşmesi (sabit boyutlu hata kodu/mesaj yapısı, `ResourceLimits` ön kontrolü, codec-özel deallocator eşleşmesi).
+- [x] Native adapter etkin değilken (`source: "nox"` varsayılan derlemede) JPEG/WebP/TIFF çağrılarının derleme hatası vermeden saf NOX header probing (`probe_jpeg`, `probe_webp`, `probe_tiff`) sonrası `CodecUnavailableError` fırlatması ve açık capability bayrağıyla sunulması.
+- [x] `EncodeOptions` içinde `quality (1..100)`, `lossless`, `JpegSubsampling`, `strip_private_metadata` seçeneklerinin doğrulanması (`EncodeOptions.with_quality`, `jpeg_default`, `webp_default`).
+- [x] `docs/native-adapters.md` içinde `libjpeg-turbo` (BSD-3/IJG), `libwebp` (BSD-3) ve `libtiff` (BSD-like) lisans, ABI, CVE ve platform dağıtım matrisi.
 
 #### Faz F8 (`v0.8.0`) Çıkış Kapısı
-- [ ] Native codec olmadan core derleniyor ve tüm taşınabilir formatları (PPM/PGM/BMP/PNG) işliyor.
-- [ ] Adapter arayüzü ve `CodecUnavailableError` / opt-in C ABI köprüsü corruption ve limit testlerini geçiyor.
-- [ ] Paket `source` etiketi ve üçüncü taraf lisans yükümlülükleri eksiksiz belgeli.
+- [x] Native codec olmadan core derleniyor ve tüm taşınabilir formatları (PPM/PGM/BMP/PNG) işliyor.
+- [x] Adapter arayüzü ve `CodecUnavailableError` / opt-in C ABI köprüsü corruption ve limit testlerini geçiyor (`tests/codecs/native_adapters_test.nox`).
+- [x] Paket `source` etiketi ve üçüncü taraf lisans yükümlülükleri eksiksiz belgeli.
 
 ---
 
@@ -796,4 +796,34 @@ Bağımlılık sırası: `v0.0.1 (F0) -> v0.1.0 (F1) -> v0.2.0 (F2) -> v0.3.0 (F
   noxc run examples/watermark.nox
   noxc run --backend qbe examples/watermark.nox
   => watermark-example-ok 120 64 80 8
+  ```
+
+### `v0.8.0` (Faz F8 — Optional Native Codec Adapters & Pure-NOX Header Probing) — 2026-11-23
+
+- **Derleyici & Ortam:** `noxc 2.2.38` (`/Users/melihburakmemis/.nox-lang/bin/noxc`), macOS arm64 (Apple Silicon).
+- **Çalıştırılan Doğrulama Komutları ve Çıktıları:**
+  ```text
+  noxc check prism.nox
+  noxc check --strict-spawn-shared prism.nox
+  noxc check --profile freestanding codecs/jpeg_adapter.nox
+  noxc check --profile freestanding codecs/webp_adapter.nox
+  noxc check --profile freestanding codecs/tiff_adapter.nox
+  => 0 type errors
+
+  noxc test
+  => native_adapters_test-ok
+  => png_test-ok
+  => portable_codecs_test-ok
+  => header_fuzz_test-ok: 10000 iterations, 10000 rejected cleanly
+  => resample_golden_test-ok: 120 golden cases passed
+  => color_metadata_test-ok
+  => core_pixel_test-ok: 2x2, color, ppm/pgm, 26 negative tests, 1000 random image properties passed
+  => draw_composite_test-ok
+  => facade_test-ok
+  => filters_test-ok
+  => geometry_test-ok
+  => 11 passed, 0 failed (11 total)
+
+  noxc test --backend qbe
+  => 11 passed, 0 failed (11 total)
   ```

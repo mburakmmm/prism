@@ -2,10 +2,10 @@
 
 > **Verified with:** `noxc 2.2.38` (`/Users/melihburakmemis/.nox-lang/bin/noxc`)  
 > **Host verified:** macOS arm64 (Apple Silicon) — LLVM and QBE backends  
-> **Date:** 2026-11-21  
-> **Active Release:** `v0.7.0` (Phases F0–F7 Complete)
+> **Date:** 2026-11-23  
+> **Active Release:** `v0.8.0` (Phases F0–F8 Complete)
 
-## 1. Core Pixel, I/O, Geometry, PNG, Color/Metadata, Filter & Drawing/Compositing Capabilities (`v0.7.0`)
+## 1. Core Pixel, I/O, Geometry, PNG, Color/Metadata, Filter, Drawing & Adapter Capabilities (`v0.8.0`)
 
 | Capability | Status | Module | Backends Verified | Notes |
 |---|---|---|---|---|
@@ -28,27 +28,28 @@
 | 2D Canvas, Shapes, Bezier Paths, Anti-Aliased Lines, Iterative Flood Fill & Embedded Bitmap Font | **VERIFIED** | `draw/canvas.nox`, `draw/rasterizer.nox`, `draw/shapes.nox`, `draw/paths.nox`, `draw/text.nox` | LLVM, QBE, Freestanding | `Canvas` clipping, `draw_line_aa`, iterative `flood_fill`, rect/rounded-rect/circle/ellipse/polygon/Bezier, 8x8 font `measure_text` & `draw_text` |
 | Pure-NOX Zlib (RFC 1950), DEFLATE (RFC 1951), CRC-32 & Adler-32 | **VERIFIED** | `codecs/deflate.nox` | LLVM, QBE, Freestanding | Stored (BTYPE 0), Fixed Huffman (BTYPE 1), Dynamic Huffman (BTYPE 2) + LZ77 compressor |
 | Pure-NOX 8-bit PNG Engine (`probe_png`, `decode_png`, `encode_png`) | **VERIFIED** | `codecs/png.nox` | LLVM, QBE | Color Types 0, 2, 3 (`PLTE`+`tRNS`), 4, 6; Scanline Filters 0–4; `eXIf`/`iCCP`/`tEXt` hygiene & autorotate |
+| Pure-NOX Header Probing & Opt-In C ABI Boundary (JPEG, WebP, TIFF) | **VERIFIED** | `codecs/jpeg_adapter.nox`, `codecs/webp_adapter.nox`, `codecs/tiff_adapter.nox`, `native/include/prism_native_abi.h` | LLVM, QBE, Freestanding | Pure-NOX `probe_jpeg`/`probe_webp`/`probe_tiff`, option/limit validation & `CodecUnavailableError` fallback when native backends are disabled |
 
-## 2. Codec Support Matrix (`v0.5.0`)
+## 2. Codec Support Matrix (`v0.8.0`)
 
 | Format | Probe | Decode | Encode | Implementation | Phase / Status |
 |---|---|---|---|---|---|
-| **PPM (P6 binary RGB8)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | Pure NOX (`codecs/ppm.nox`) | F1–F2 / `v0.5.0` |
-| **PGM (P5 binary GRAY8)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | Pure NOX (`codecs/pgm.nox`) | F1–F2 / `v0.5.0` |
-| **BMP (24/32-bit uncompressed BI_RGB)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | Pure NOX (`codecs/bmp.nox`) | F2 / `v0.5.0` (bottom-up & top-down, 4-byte padding) |
-| **PNG (8-bit Gray/RGB/RGBA/Palette+tRNS)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | Pure NOX (`codecs/png.nox`, `codecs/deflate.nox`) | F4–F5 / `v0.5.0` (includes `eXIf` autorotate, private metadata strip & `iCCP` carry) |
-| **JPEG (baseline)** | Sniff only | Planned | Planned | Optional Native Adapter (`codecs/jpeg_adapter.nox`) | F8 / `v0.8.0` (currently raises `CodecUnavailableError`) |
-| **WebP (lossy/lossless)** | Sniff only | Planned | Planned | Optional Native Adapter (`codecs/webp_adapter.nox`) | F8 / `v0.8.0` (currently raises `CodecUnavailableError`) |
+| **PPM (P6 binary RGB8)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | Pure NOX (`codecs/ppm.nox`) | F1–F2 / `v0.8.0` |
+| **PGM (P5 binary GRAY8)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | Pure NOX (`codecs/pgm.nox`) | F1–F2 / `v0.8.0` |
+| **BMP (24/32-bit uncompressed BI_RGB)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | Pure NOX (`codecs/bmp.nox`) | F2 / `v0.8.0` (bottom-up & top-down, 4-byte padding) |
+| **PNG (8-bit Gray/RGB/RGBA/Palette+tRNS)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | Pure NOX (`codecs/png.nox`, `codecs/deflate.nox`) | F4–F5 / `v0.8.0` (includes `eXIf` autorotate, private metadata strip & `iCCP` carry) |
+| **JPEG (baseline)** | **VERIFIED** | Opt-in Native ABI | Opt-in Native ABI | Pure NOX probe (`codecs/jpeg_adapter.nox`) + C ABI | F8 / `v0.8.0` (`probe_jpeg` active; decode/encode raise `CodecUnavailableError` without native backend) |
+| **WebP (VP8/VP8L/VP8X)** | **VERIFIED** | Opt-in Native ABI | Opt-in Native ABI | Pure NOX probe (`codecs/webp_adapter.nox`) + C ABI | F8 / `v0.8.0` (`probe_webp` active; decode/encode raise `CodecUnavailableError` without native backend) |
 | **GIF (still/animated)** | Sniff only | Planned | Planned | Pure NOX (`codecs/gif.nox`) | F9 / `v0.8.5` |
-| **TIFF (baseline)** | Sniff only | Planned | Planned | Optional Native Adapter (`codecs/tiff_adapter.nox`) | F8–F9 (currently raises `CodecUnavailableError`) |
+| **TIFF (baseline LE/BE)** | **VERIFIED** | Opt-in Native ABI | Opt-in Native ABI | Pure NOX probe (`codecs/tiff_adapter.nox`) + C ABI | F8 / `v0.8.0` (`probe_tiff` active; decode/encode raise `CodecUnavailableError` without native backend) |
 
 ## 3. Platform & Backend Verification Status
 
 | Target / Profile | Core, Transform, Metadata & DEFLATE Kernels | File I/O (`PPM`/`PGM`/`BMP`/`PNG`) | Concurrency (`spawn`) | Status |
 |---|---|---|---|---|
-| **macOS arm64 (LLVM)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | 10 test suites passed (`noxc 2.2.38`) |
-| **macOS arm64 (QBE)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | 10 test suites passed (`noxc 2.2.38`) |
-| **Freestanding (`--profile freestanding`)** | **VERIFIED** (`core/*`, `transforms/*`, `filters/*`, `composite/*`, `draw/*`, `codecs/deflate.nox`, `codecs/sniff.nox`, `codecs/registry.nox`) | N/A (No OS FS) | N/A | 36 pure modules pass freestanding type-check |
+| **macOS arm64 (LLVM)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | 11 test suites passed (`noxc 2.2.38`) |
+| **macOS arm64 (QBE)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | 11 test suites passed (`noxc 2.2.38`) |
+| **Freestanding (`--profile freestanding`)** | **VERIFIED** (`core/*`, `transforms/*`, `filters/*`, `composite/*`, `draw/*`, `codecs/deflate.nox`, `codecs/sniff.nox`, `codecs/registry.nox`, `codecs/*_adapter.nox`) | N/A (No OS FS) | N/A | 39 pure modules pass freestanding type-check |
 | **Linux x64 / arm64** | CI Configured | CI Configured | CI Configured | `NOT VERIFIED` locally (workflow in `.github/workflows/ci.yml`) |
 | **Windows x64** | CI Configured | CI Configured | CI Configured | `NOT VERIFIED` locally (workflow in `.github/workflows/ci.yml`) |
 | **WASM (`wasm32-wasi` / `wasm32-freestanding`)** | Planned (F14) | WASI/VFS only | Mode-dependent | Planned for Phase F14 (`v0.9.8`) |

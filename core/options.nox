@@ -56,3 +56,18 @@ class EncodeOptions:
     def overwrite_atomic() -> EncodeOptions:
 
         return EncodeOptions(ResourceLimits.default(), 85, True, True, True, True)
+
+    @staticmethod
+    def with_quality(quality: int, lossless: bool) -> EncodeOptions:
+
+        return EncodeOptions(ResourceLimits.default(), quality, lossless, True, False, True)
+
+    @staticmethod
+    def jpeg_default(quality: int) -> EncodeOptions:
+
+        return EncodeOptions(ResourceLimits.default(), quality, False, True, False, True)
+
+    @staticmethod
+    def webp_default(quality: int, lossless: bool) -> EncodeOptions:
+
+        return EncodeOptions(ResourceLimits.default(), quality, lossless, True, False, True)

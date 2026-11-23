@@ -1,0 +1,140 @@
+from nox.buffer import Buffer
+from core.errors import CodecUnavailableError, CorruptDataError, InvalidImageError, UnsupportedFormatError, UnsupportedPixelFormatError
+from core.image import Image
+from core.metadata import ExifSummary, ImageInfo, ImageMetadata, parse_exif_buffer
+from core.options import DecodeOptions, EncodeOptions
+from core.pixel import AlphaMode, ColorSpace, PixelFormat
+
+__all__: list[str] = ["JpegSubsampling", "is_native_jpeg_available", "validate_jpeg_encode_options", "probe_jpeg", "decode_jpeg", "encode_jpeg"]
+
+enum JpegSubsampling:
+    S444
+    S422
+    S420
+    GRAY
+
+    def name(self) -> str:
+        match self:
+            case JpegSubsampling.S444:
+                return "4:4:4"
+            case JpegSubsampling.S422:
+                return "4:2:2"
+            case JpegSubsampling.S420:
+                return "4:2:0"
+            case JpegSubsampling.GRAY:
+                return "4:0:0"
+
+def is_native_jpeg_available() -> bool:
+    """Return True if the optional native JPEG C ABI backend is linked in this build."""
+    return False
+
+def validate_jpeg_encode_options(opt: EncodeOptions, subsampling: JpegSubsampling) -> None:
+    """Validate JPEG encoding quality, lossy requirement, and subsampling options."""
+    if opt.quality < 1 or opt.quality > 100:
+        raise InvalidImageError("JPEG quality must be in range [1, 100]")
+    if opt.lossless:
+        raise UnsupportedFormatError("baseline JPEG encoder does not support lossless=True (use PNG or WebP lossless)")
+
+def _is_sof_marker(marker: int) -> bool:
+    return marker >= 192 and marker <= 195 or marker >= 197 and marker <= 199 or marker >= 201 and marker <= 203 or marker >= 205 and marker <= 207
+
+def probe_jpeg(data: Buffer, opt: DecodeOptions) -> ImageInfo:
+    """Validate and probe a JPEG bitstream header in pure Nox without decoding full pixels."""
+    opt.limits.validate_input_size(data.len())
+    total: int = data.len()
+    if total < 4:
+        raise CorruptDataError("JPEG data is too short (< 4 bytes)")
+    if int(data.get(0)) != 255 or int(data.get(1)) != 216:
+        raise CorruptDataError("invalid JPEG SOI signature")
+
+    meta: ImageMetadata = ImageMetadata.default()
+    pos: int = 2
+    segments_scanned: int = 0
+
+    while pos < total:
+        segments_scanned = segments_scanned + 1
+        if segments_scanned > 4096:
+            raise CorruptDataError("JPEG marker count exceeds safe header scan limit")
+
+        if int(data.get(pos)) != 255:
+            raise CorruptDataError("expected JPEG 0xFF marker prefix at offset " + str(pos))
+        while pos < total and int(data.get(pos)) == 255:
+            pos = pos + 1
+        if pos >= total:
+            raise CorruptDataError("truncated JPEG marker byte")
+
+        marker: int = int(data.get(pos))
+        pos = pos + 1
+
+        if marker == 0 or marker == 1 or marker >= 208 and marker <= 215:
+            continue
+        if marker == 217 or marker == 218:
+            raise CorruptDataError("JPEG stream reached EOI/SOS before a Start-of-Frame (SOF) header")
+
+        if pos + 2 > total:
+            raise CorruptDataError("truncated JPEG marker length at offset " + str(pos))
+        seg_len: int = int(data.get(pos)) << 8 | int(data.get(pos + 1))
+        if seg_len < 2 or pos + seg_len > total:
+            raise CorruptDataError("invalid or out-of-bounds JPEG marker segment length")
+
+        # APP1 (0xE1) EXIF inspection
+        if marker == 225 and seg_len >= 16:
+            if int(data.get(pos + 2)) == 69 and int(data.get(pos + 3)) == 120 and int(data.get(pos + 4)) == 105 and int(data.get(pos + 5)) == 102 and int(data.get(pos + 6)) == 0 and int(data.get(pos + 7)) == 0:
+                exif_len: int = seg_len - 8
+                opt.limits.validate_metadata_size(exif_len)
+                exif_buf: Buffer = Buffer(exif_len)
+                ei: int = 0
+                while ei < exif_len:
+                    exif_buf.set(ei, data.get(pos + 8 + ei))
+                    ei = ei + 1
+                summary: ExifSummary = parse_exif_buffer(exif_buf, opt.limits)
+                meta.orientation = summary.orientation
+                meta.has_gps_data = summary.has_gps_data
+                meta.has_private_tags = summary.has_private_tags
+
+        if _is_sof_marker(marker):
+            if seg_len < 8:
+                raise CorruptDataError("truncated JPEG SOF segment")
+            precision: int = int(data.get(pos + 2))
+            if precision != 8:
+                if precision == 12 or precision == 16:
+                    raise UnsupportedPixelFormatError("JPEG bit precision " + str(precision) + " is not supported in 8-bit core")
+                raise CorruptDataError("invalid JPEG sample precision: " + str(precision))
+
+            h: int = int(data.get(pos + 3)) << 8 | int(data.get(pos + 4))
+            w: int = int(data.get(pos + 5)) << 8 | int(data.get(pos + 6))
+            comps: int = int(data.get(pos + 7))
+            if seg_len < 8 + comps * 3:
+                raise CorruptDataError("truncated JPEG SOF component specification")
+
+            fmt: PixelFormat = PixelFormat.RGB8
+            if comps == 1:
+                fmt = PixelFormat.GRAY8
+            elif comps == 3:
+                fmt = PixelFormat.RGB8
+            elif comps == 4:
+                fmt = PixelFormat.RGBA8
+            else:
+                raise UnsupportedPixelFormatError("unsupported JPEG component count: " + str(comps))
+
+            opt.limits.validate_dimensions(w, h, fmt.bytes_per_pixel())
+            return ImageInfo(w, h, fmt, ColorSpace.SRGB, AlphaMode.OPAQUE, 1, "JPEG", meta)
+
+        pos = pos + seg_len
+
+    raise CorruptDataError("truncated JPEG stream without Start-of-Frame header")
+
+def decode_jpeg(data: Buffer, opt: DecodeOptions) -> Image:
+    """Validate JPEG headers/limits in pure Nox and invoke the optional native JPEG decoder when linked."""
+    info: ImageInfo = probe_jpeg(data, opt)
+    if not is_native_jpeg_available():
+        raise CodecUnavailableError("JPEG decode (" + str(info.width) + "x" + str(info.height) + ") requires optional native JPEG adapter (libjpeg-turbo C ABI not linked)")
+    raise CodecUnavailableError("native JPEG adapter unavailable")
+
+def encode_jpeg(img: Image, opt: EncodeOptions, subsampling: JpegSubsampling) -> Buffer:
+    """Validate JPEG encoding options and ResourceLimits, then invoke the optional native JPEG encoder when linked."""
+    validate_jpeg_encode_options(opt, subsampling)
+    opt.limits.validate_dimensions(img.width(), img.height(), img.bytes_per_pixel())
+    if not is_native_jpeg_available():
+        raise CodecUnavailableError("JPEG encode requires optional native JPEG adapter (libjpeg-turbo C ABI not linked)")
+    raise CodecUnavailableError("native JPEG adapter unavailable")

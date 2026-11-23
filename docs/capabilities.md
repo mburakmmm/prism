@@ -3,9 +3,9 @@
 > **Verified with:** `noxc 2.2.38` (`/Users/melihburakmemis/.nox-lang/bin/noxc`)  
 > **Host verified:** macOS arm64 (Apple Silicon) — LLVM and QBE backends  
 > **Date:** 2026-11-23  
-> **Active Release:** `v0.9.0` (Phases F0–F10 Complete)
+> **Active Release:** `v0.9.2` (Phases F0–F11 Complete)
 
-## 1. Core Pixel, I/O, Geometry, PNG, Color/Metadata, Filter, Drawing, Adapters, GIF & Pipeline (`v0.9.0`)
+## 1. Core Pixel, I/O, Geometry, PNG, Color/Metadata, Filter, Drawing, GIF, Pipeline & Streaming (`v0.9.2`)
 
 | Capability | Status | Module | Backends Verified | Notes |
 |---|---|---|---|---|
@@ -31,6 +31,7 @@
 | Pure-NOX Header Probing & Opt-In C ABI Boundary (JPEG, WebP, TIFF) | **VERIFIED** | `codecs/jpeg_adapter.nox`, `codecs/webp_adapter.nox`, `codecs/tiff_adapter.nox`, `native/include/prism_native_abi.h` | LLVM, QBE, Freestanding | Pure-NOX `probe_jpeg`/`probe_webp`/`probe_tiff`, option/limit validation & `CodecUnavailableError` fallback when native backends are disabled |
 | Animation Timeline & Pure-NOX GIF87a/GIF89a LZW Engine | **VERIFIED** | `animation/frame.nox`, `animation/timeline.nox`, `animation/gif.nox`, `codecs/gif.nox` | LLVM, QBE, Freestanding | `Frame`, `Animation`, `Timeline.render_frames()`, disposal `0..3`, transparency, `NETSCAPE2.0` loop, LZW encode/decode, `max_frames` & budget checks |
 | Pipeline DAG, Algebraic Planner, Halo-Aware Tiling & LRU Cache | **VERIFIED** | `pipeline/nodes.nox`, `pipeline/graph.nox`, `pipeline/planner.nox`, `pipeline/tiles.nox`, `pipeline/cache.nox`, `pipeline/executor.nox` | LLVM, QBE, Freestanding | `PipelineGraph`, `optimize_pipeline`, `execute_tiled_node`, `PlanCache` (`max_bytes` LRU), 1,000 random pipeline equivalence verified |
+| Windowed Scanline Streaming, Confined SpillManager & Parallel Spawn Batch/Tiles | **VERIFIED** | `pipeline/streaming.nox`, `pipeline/parallel.nox` | LLVM, QBE (`--strict-spawn-shared`) | `StreamImageReader`/`StreamImageWriter` (`with` protocol, atomic commit), `SpillManager` (`max_temp_bytes`), `execute_tiled_node_parallel`, `BatchProcessor` (`FAIL_FAST`/`COLLECT_ERRORS`) |
 
 ## 2. Codec Support Matrix (`v0.8.5`)
 
@@ -49,8 +50,8 @@
 
 | Target / Profile | Core, Transform, Metadata & DEFLATE Kernels | File I/O (`PPM`/`PGM`/`BMP`/`PNG`/`GIF`) | Concurrency (`spawn`) | Status |
 |---|---|---|---|---|
-| **macOS arm64 (LLVM)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | 13 test suites passed (`noxc 2.2.38`) |
-| **macOS arm64 (QBE)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | 13 test suites passed (`noxc 2.2.38`) |
+| **macOS arm64 (LLVM)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | 14 test suites passed (`noxc 2.2.38`) |
+| **macOS arm64 (QBE)** | **VERIFIED** | **VERIFIED** | **VERIFIED** | 14 test suites passed (`noxc 2.2.38`) |
 | **Freestanding (`--profile freestanding`)** | **VERIFIED** (`core/*`, `transforms/*`, `filters/*`, `composite/*`, `draw/*`, `animation/*`, `pipeline/*`, `codecs/deflate.nox`, `codecs/sniff.nox`, `codecs/registry.nox`, `codecs/*_adapter.nox`, `codecs/gif.nox`) | N/A (No OS FS) | N/A | 49 pure modules pass freestanding type-check |
 | **Linux x64 / arm64** | CI Configured | CI Configured | CI Configured | `NOT VERIFIED` locally (workflow in `.github/workflows/ci.yml`) |
 | **Windows x64** | CI Configured | CI Configured | CI Configured | `NOT VERIFIED` locally (workflow in `.github/workflows/ci.yml`) |

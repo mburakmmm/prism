@@ -37,8 +37,9 @@
 - **64-bit Signed `int` Wrap-Around:** Plain integer `+`, `-`, `*` wrap silently on 64-bit two's-complement overflow. All image dimension, stride, chunk, and frame work budget arithmetic must go through Prism's `checked_add`, `checked_sub`, and `checked_mul` (`core/limits.nox`).
 - **`nox.test` Missing `assert_false`:** `nox.test` exposes `assert_true`, `assert_eq_int`, `assert_eq_str`, etc., but has no `assert_false` helper (`UndefinedFunction: module 'nox.test' has no member named 'assert_false'`). Use `nox.test.assert_true(not cond, msg)`.
 
-## 6. Freestanding Profile & Target Limitations
+## 6. Freestanding Profile & Concurrency Limitations
 
 - **`nox.math` vs. `nox.mathx` Split:** `nox.math` depends on hosted libc math symbols and fails under `noxc check --profile freestanding`. All portable pure-Nox pixel/transform/filter/composite/draw/animation modules must import `nox.mathx` instead of `nox.math`.
+- **`list[Task[T]]` Unsupported & Class `async def` Methods:** Storing tasks directly in a list (`list[Task[T]]`) is rejected (`use nox.tasks.TaskGroup[T]`), `async def` functions must be started via `spawn` rather than direct `await fn(...)` calls, `async def` methods inside classes cannot `await`, and `noxc check --strict-spawn-shared` forbids passing shared parameters from a `spawn` target directly into helper functions without first creating an isolated local copy.
 - **No Built-In Compression or Image Codecs in Stdlib:** The NOX standard library currently has no built-in `zlib`/`deflate`, `lzw`, `crc32`, `adler32`, or `nox.image` codec package. Prism implements pure-Nox RFC 1950/1951 Zlib/DEFLATE, IEEE 802.3 CRC-32, RFC 1950 Adler-32, Netpbm (`P5`/`P6`), uncompressed 24/32-bit BMP, 8-bit PNG, and GIF87a/GIF89a LZW.
 - **Native Dynamic Loading & `wasm32-*` Targets:** `extern def` cannot accept NOX classes, `list`, or `Optional` directly across C ABI boundaries, `ptr_of` pointers are invalidated by list growth, and native shared libraries cannot be dynamically loaded on `wasm32-*` or `--profile freestanding` targets (see [`docs/native-adapters.md`](native-adapters.md)).

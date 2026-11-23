@@ -56,8 +56,8 @@ Bu dosya, `AGENTS.md` içindeki bağlayıcı mühendislik sözleşmesini, güven
 | **v0.8.0** | **F8** | Native Codec Adapters (İzole C ABI Sınırı, Opt-in JPEG & WebP Decode/Encode, `CodecUnavailableError` Fallback, Leak/CVE Harness) | Web / Backend Sürümü | **TAMAMLANDI** |
 | **v0.8.5** | **F9** | Animation & Advanced Formats (`Frame`/`Animation` Modeli, GIF LZW/Disposal/Transparency/Loop, APNG & Animated WebP Pilotu) | Profesyonel | **TAMAMLANDI** |
 | **v0.9.0** | **F10** | Pipeline DAG, Planner & Tile Engine (Immutable Operasyon Grafı, Güvenli Plan Optimizasyonu, Halo/Border Hesabı, Bounded Tile Executor, Cache) | Yüksek Performans | **TAMAMLANDI** |
-| **v0.9.2** | **F11** | Streaming, Large Image & Batch Processing (`ImageReader`/`ImageWriter`, Disk Spill & Quota, Atomik Commit, `spawn` Paralel Tile/Batch) | Yüksek Performans | **SIRADAKİ FAZ** |
-| **v0.9.4** | **F12** | Advanced Color/Type & Pro Features (`GRAY16`/`RGB16`/`RGBA16`/`RGBAF32`, PNG 16-bit/Adam7, Quantization, Dithering, CLAHE, Canny, ICC Adapter) | Profesyonel | PLANLANDI |
+| **v0.9.2** | **F11** | Streaming, Large Image & Batch Processing (`ImageReader`/`ImageWriter`, Disk Spill & Quota, Atomik Commit, `spawn` Paralel Tile/Batch) | Yüksek Performans | **TAMAMLANDI** |
+| **v0.9.4** | **F12** | Advanced Color/Type & Pro Features (`GRAY16`/`RGB16`/`RGBA16`/`RGBAF32`, PNG 16-bit/Adam7, Quantization, Dithering, CLAHE, Canny, ICC Adapter) | Profesyonel | **SIRADAKİ FAZ** |
 | **v0.9.6** | **F13** | Ecosystem Integrations & CLI (`prism` CLI, Nyx Upload/Thumbnail, Aether, Ember Batch, Aura Surface, Nova HTTP SSRF-Safe Adapter, Atlas/Pulse/Glyph) | Ekosistem & Web | PLANLANDI |
 | **v0.9.8** | **F14** | Portability (`wasm32-wasi`, `wasm32-freestanding`, `--profile freestanding` Saf Piksel Çekirdeği, Mobil Link/ABI Denetimi) | Taşınabilirlik | PLANLANDI |
 | **v0.9.9** | **F15** | Security, Fuzzing, Differential Benchmarks & Release Candidate (10k+ Corpus Fuzz, Pillow/Sharp Kıyas Raporu, SBOM, 24h Stress Planı) | RC Hardening | PLANLANDI |
@@ -465,19 +465,19 @@ Bağımlılık sırası: `v0.0.1 (F0) -> v0.1.0 (F1) -> v0.2.0 (F2) -> v0.3.0 (F
 **Hedef:** Bellek tavanını aşmayan chunk/scanline akışı, kontrollü temp disk spill ve `--strict-spawn-shared` uyumlu paralel batch/tile işleme.
 
 #### F11.1 — Streaming Reader/Writer ve Disk Spill (`pipeline/streaming.nox`)
-- [ ] `ImageReader` ve `ImageWriter` (`with` protokolü destekli, scanline/tile pencereli okuma/yazma).
-- [ ] İzinli temp dizini altında (`nox.path.safe_join`), `limits.max_temp_bytes` kotalı `SpillManager`; iptal veya hata durumunda geçici dosyaların otomatik temizlenmesi.
-- [ ] Atomik çıktı geçişi (partial/yarım kalmış çıktı dosyasının hedefi ezmemesi).
+- [x] `StreamImageReader` ve `StreamImageWriter` (`with` protokolü destekli, scanline/strip pencereli PPM/PGM okuma/yazma).
+- [x] İzinli temp dizini altında (`nox.path.safe_join`), `limits.max_temp_bytes` kotalı `SpillManager`; iptal veya hata durumunda geçici dosyaların otomatik temizlenmesi.
+- [x] Atomik çıktı geçişi (partial/yarım kalmış çıktı dosyasının hedefi ezmemesi).
 
 #### F11.2 — Paralel Tile ve Batch İşleme (`pipeline/parallel.nox`)
-- [ ] NOX `spawn` ile ayrık (disjoint) tile/batch işlerinin paralel yürütülmesi ve tile koordinatına / iş indeksine göre deterministik sırada birleştirilmesi.
-- [ ] `BatchProcessor` ve `BatchResult`: hata politikası (`FAIL_FAST` veya `COLLECT_ERRORS`), idempotency key (`input_hash + pipeline_fingerprint + version`) ve iş bazlı kaynak sınırı.
-- [ ] `noxc check --strict-spawn-shared` doğrulaması.
+- [x] NOX `spawn` + `nox.tasks.TaskGroup` ile ayrık (disjoint) tile/batch işlerinin paralel yürütülmesi ve tile koordinatına / iş indeksine göre deterministik sırada birleştirilmesi (`execute_tiled_node_parallel`, `execute_pipeline_parallel`).
+- [x] `BatchProcessor` (`process_batch_images`) ve `BatchResult`: hata politikası (`FAIL_FAST` veya `COLLECT_ERRORS`), idempotency key (`compute_batch_idempotency_key`) ve iş bazlı kaynak sınırı.
+- [x] `noxc check --strict-spawn-shared` doğrulaması (`pipeline/parallel.nox`, `examples/batch.nox`, `tests/unit/streaming_parallel_test.nox`).
 
 #### Faz F11 (`v0.9.2`) Çıkış Kapısı
-- [ ] Streaming senaryosu tüm dosyayı tek seferde kontrolsüz belleğe yüklemeden pencere bütçesiyle çalışıyor.
-- [ ] Temp disk kotası, iptal ve hata sonrası temizlik testleri geçiyor.
-- [ ] Paralel ve tek iş parçacıklı batch/tile çıktıları bit-exact eşit.
+- [x] Streaming senaryosu tüm dosyayı tek seferde kontrolsüz belleğe yüklemeden pencere bütçesiyle çalışıyor.
+- [x] Temp disk kotası, iptal ve hata sonrası temizlik testleri geçiyor (`tests/unit/streaming_parallel_test.nox`).
+- [x] Paralel ve tek iş parçacıklı batch/tile çıktıları bit-exact eşit (`pixel_equals == True`).
 
 ---
 
@@ -894,4 +894,41 @@ Bağımlılık sırası: `v0.0.1 (F0) -> v0.1.0 (F1) -> v0.2.0 (F2) -> v0.3.0 (F
   noxc run examples/pipeline_demo.nox
   noxc run --backend qbe examples/pipeline_demo.nox
   => pipeline-demo-ok 24 24 2 1
+  ```
+
+### `v0.9.2` (Faz F11 — Streaming Scanline I/O, Bounded Disk Spill & Parallel Batch/Tile Execution) — 2026-11-23
+
+- **Derleyici & Ortam:** `noxc 2.2.38` (`/Users/melihburakmemis/.nox-lang/bin/noxc`), macOS arm64 (Apple Silicon).
+- **Çalıştırılan Doğrulama Komutları ve Çıktıları:**
+  ```text
+  noxc check prism.nox
+  noxc check --strict-spawn-shared prism.nox
+  noxc check --strict-spawn-shared pipeline/parallel.nox
+  noxc check --strict-spawn-shared examples/batch.nox
+  noxc check --strict-spawn-shared tests/unit/streaming_parallel_test.nox
+  => 0 type errors
+
+  noxc test
+  => gif_animation_test-ok
+  => native_adapters_test-ok
+  => png_test-ok
+  => portable_codecs_test-ok
+  => header_fuzz_test-ok: 10000 iterations, 10000 rejected cleanly
+  => resample_golden_test-ok: 120 golden cases passed
+  => color_metadata_test-ok
+  => core_pixel_test-ok: 2x2, color, ppm/pgm, 26 negative tests, 1000 random image properties passed
+  => draw_composite_test-ok
+  => facade_test-ok
+  => filters_test-ok
+  => geometry_test-ok
+  => pipeline_test-ok: 1000 random pipelines, seam/halo & LRU cache passed
+  => streaming_parallel_test-ok
+  => 14 passed, 0 failed (14 total)
+
+  noxc test --backend qbe
+  => 14 passed, 0 failed (14 total)
+
+  noxc run examples/batch.nox
+  noxc run --backend qbe examples/batch.nox
+  => batch-example-ok 4 16 16
   ```

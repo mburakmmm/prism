@@ -2,6 +2,14 @@
 
 All notable changes to Prism are documented in this file. Prism follows Semantic Versioning (`0.x` experimental phase gates leading to `1.0.0`).
 
+## [0.9.2] — 2026-11-23 (Phase F11 Streaming Scanline I/O, Bounded Disk Spill & Parallel Batch/Tile Execution)
+
+### Added
+
+- `pipeline/streaming.nox`: Windowed `StreamImageReader` (`with` protocol, chunked header parse, `read_scanline_strip`), atomic-commit `StreamImageWriter` (`write_scanline_strip`, `commit`, automatic temp cleanup on `abort` or incomplete stream), and confined `SpillManager` (`nox.path.safe_join`, `max_temp_bytes` quota, `cleanup`).
+- `pipeline/parallel.nox`: Deterministic `spawn` + `TaskGroup` parallel tile execution (`execute_tiled_node_parallel`, `execute_pipeline_parallel`) and `BatchProcessor` / `process_batch_images` (`BatchErrorPolicy.FAIL_FAST` and `COLLECT_ERRORS`, `compute_batch_idempotency_key`), verified cleanly under `noxc check --strict-spawn-shared`.
+- `examples/batch.nox` & `tests/unit/streaming_parallel_test.nox`: Scanline strip streaming round-trips, partial-commit target preservation, spill quota/traversal enforcement, parallel-vs-sequential bit-exact tile equivalence, and multi-item batch tests verified on LLVM and QBE backends.
+
 ## [0.9.0] — 2026-11-23 (Phase F10 Pipeline DAG, Algebraic Planner & Halo-Aware Tile Engine)
 
 ### Added

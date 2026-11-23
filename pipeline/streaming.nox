@@ -1,0 +1,393 @@
+import nox.bytes
+import nox.fs
+import nox.path
+import nox.strings
+from nox.buffer import Buffer
+from nox.fs import FileReader, FileWriter, FsError
+from nox.path import PathError
+from core.errors import CorruptDataError, DimensionError, ImageIOError, ResourceLimitError, UnsupportedFormatError, UnsupportedPixelFormatError
+from core.image import Image, MutableImage
+from core.limits import ResourceLimits, checked_add, checked_mul
+from core.options import DecodeOptions, EncodeOptions
+from core.pixel import ColorSpace, Pixel, PixelFormat
+from core.storage import PixelStorage
+
+__all__: list[str] = ["SpillManager", "StreamImageReader", "StreamImageWriter"]
+
+class SpillManager:
+    """Confined temporary disk-spill manager bounded by ResourceLimits.max_temp_bytes."""
+
+    temp_root_dir: str
+    max_temp_bytes: int
+    used_temp_bytes: int
+    spill_paths: list[str]
+    seq: int
+
+    def __init__(self, temp_root_dir: str, max_temp_bytes: int) -> None:
+        if temp_root_dir == "":
+            raise ImageIOError("SpillManager temp_root_dir cannot be empty")
+        if max_temp_bytes < 0:
+            raise DimensionError("SpillManager max_temp_bytes must be non-negative")
+        self.temp_root_dir = temp_root_dir
+        self.max_temp_bytes = max_temp_bytes
+        self.used_temp_bytes = 0
+        self.spill_paths = []
+        self.seq = 0
+
+    @staticmethod
+    def create(temp_root_dir: str, lim: ResourceLimits) -> SpillManager:
+
+        return SpillManager(temp_root_dir, lim.max_temp_bytes)
+
+    def spill_buffer(self, label: str, data: Buffer) -> str:
+
+        """Write `data` to a confined temp file if within `max_temp_bytes` quota; returns file path."""
+        sz: int = data.len()
+        next_total: int = checked_add(self.used_temp_bytes, sz)
+        if next_total > self.max_temp_bytes:
+            raise ResourceLimitError("SpillManager quota exceeded: " + str(next_total) + " > " + str(self.max_temp_bytes))
+
+        rel_name: str = label + "_" + str(self.seq) + ".spill"
+        safe_path: str = ""
+        try:
+            safe_path = nox.path.safe_join(self.temp_root_dir, rel_name)
+        except PathError as err:
+            raise ImageIOError("SpillManager blocked unsafe label/path: " + err.message)
+
+        try:
+            nox.fs.write_string_atomic(safe_path, nox.bytes.to_str(data))
+        except FsError as err:
+            raise ImageIOError("SpillManager failed to write spill file: " + err.message)
+
+        self.seq = self.seq + 1
+        self.used_temp_bytes = next_total
+        self.spill_paths.append(safe_path)
+        return safe_path
+
+    def read_spill(self, spill_path: str) -> Buffer:
+
+        """Read bytes back from an active spill file."""
+        try:
+            raw: str = nox.fs.read_to_string(spill_path)
+            return nox.bytes.from_str(raw)
+        except FsError as err:
+            raise ImageIOError("SpillManager failed to read spill file '" + spill_path + "': " + err.message)
+
+    def cleanup(self) -> int:
+
+        """Remove all tracked temporary spill files and reset quota accounting."""
+        removed: int = 0
+        i: int = 0
+        while i < len(self.spill_paths):
+            sp: str = self.spill_paths[i]
+            if nox.fs.exists(sp):
+                try:
+                    nox.fs.remove_file(sp)
+                    removed = removed + 1
+                except FsError:
+                    pass
+            i = i + 1
+        self.spill_paths = []
+        self.used_temp_bytes = 0
+        return removed
+
+def _is_ws_byte(b: int) -> bool:
+    return b == 32 or b == 9 or b == 10 or b == 13
+
+def _skip_netpbm_ws(hdr: Buffer, pos: int, total: int) -> int:
+    cur: int = pos
+    while cur < total:
+        b: int = int(hdr.get(cur))
+        if _is_ws_byte(b):
+            cur = cur + 1
+        elif b == 35:
+            cur = cur + 1
+            while cur < total and int(hdr.get(cur)) != 10 and int(hdr.get(cur)) != 13:
+                cur = cur + 1
+        else:
+            return cur
+    return cur
+
+def _parse_netpbm_token_int(hdr: Buffer, pos_arr: list[int], total: int) -> int:
+    cur: int = _skip_netpbm_ws(hdr, pos_arr[0], total)
+    if cur >= total:
+        raise CorruptDataError("unexpected EOF in Netpbm stream header")
+    digits: int = 0
+    acc: int = 0
+    while cur < total:
+        b: int = int(hdr.get(cur))
+        if b >= 48 and b <= 57:
+            if digits >= 10:
+                raise DimensionError("Netpbm header dimension exceeds digit limit")
+            acc = acc * 10 + (b - 48)
+            digits = digits + 1
+            cur = cur + 1
+        elif _is_ws_byte(b) or b == 35:
+            break
+        else:
+            raise CorruptDataError("invalid character in Netpbm stream header")
+    if digits == 0:
+        raise CorruptDataError("expected integer token in Netpbm stream header")
+    pos_arr[0] = cur
+    return acc
+
+class StreamImageReader:
+    """Windowed scanline reader for binary PPM (P6) and PGM (P5) files without full-file buffering."""
+
+    path: str
+    width: int
+    height: int
+    pixel_format: PixelFormat
+    data_offset: int
+    rows_read: int
+    limits: ResourceLimits
+    reader: FileReader
+    closed: bool
+
+    def __init__(self, path: str, width: int, height: int, fmt: PixelFormat, data_offset: int, lim: ResourceLimits, reader: FileReader) -> None:
+        self.path = path
+        self.width = width
+        self.height = height
+        self.pixel_format = fmt
+        self.data_offset = data_offset
+        self.rows_read = 0
+        self.limits = lim
+        self.reader = reader
+        self.closed = False
+
+    @staticmethod
+    def open(path: str, opt: DecodeOptions) -> StreamImageReader:
+
+        if path == "":
+            raise ImageIOError("StreamImageReader path cannot be empty")
+        try:
+            meta: nox.fs.FileMetadata = nox.fs.metadata(path)
+            opt.limits.validate_input_size(meta.size)
+            fr: FileReader = nox.fs.open_read(path)
+            hdr_str: str = fr.read_chunk(4096)
+            hdr_buf: Buffer = nox.bytes.from_str(hdr_str)
+            total: int = hdr_buf.len()
+            if total < 7:
+                fr.close()
+                raise CorruptDataError("Netpbm header too short for streaming")
+
+            b0: int = int(hdr_buf.get(0))
+            b1: int = int(hdr_buf.get(1))
+            fmt: PixelFormat = PixelFormat.RGB8
+            if b0 == 80 and b1 == 54:
+                fmt = PixelFormat.RGB8
+            elif b0 == 80 and b1 == 53:
+                fmt = PixelFormat.GRAY8
+            else:
+                fr.close()
+                raise UnsupportedFormatError("StreamImageReader supports binary PPM (P6) and PGM (P5)")
+
+            pos_arr: list[int] = [2]
+            w: int = _parse_netpbm_token_int(hdr_buf, pos_arr, total)
+            h: int = _parse_netpbm_token_int(hdr_buf, pos_arr, total)
+            maxval: int = _parse_netpbm_token_int(hdr_buf, pos_arr, total)
+            if maxval != 255:
+                fr.close()
+                raise UnsupportedPixelFormatError("StreamImageReader requires 8-bit maxval=255")
+
+            pos: int = pos_arr[0]
+            if pos >= total or not _is_ws_byte(int(hdr_buf.get(pos))):
+                fr.close()
+                raise CorruptDataError("missing whitespace separator after Netpbm maxval")
+            data_off: int = pos + 1
+
+            bpp: int = fmt.bytes_per_pixel()
+            payload_bytes: int = opt.limits.validate_dimensions(w, h, bpp)
+            req_file_size: int = checked_add(data_off, payload_bytes)
+            if meta.size < req_file_size:
+                fr.close()
+                raise CorruptDataError("truncated Netpbm stream: file size smaller than header payload")
+
+            fr.seek(data_off)
+            return StreamImageReader(path, w, h, fmt, data_off, opt.limits, fr)
+        except FsError as err:
+            raise ImageIOError("StreamImageReader failed to open '" + path + "': " + err.message)
+
+    def has_more_rows(self) -> bool:
+
+        return not self.closed and self.rows_read < self.height
+
+    def read_scanline_strip(self, max_rows: int) -> Image:
+
+        if self.closed:
+            raise ImageIOError("StreamImageReader is closed")
+        if max_rows <= 0:
+            raise DimensionError("read_scanline_strip max_rows must be positive")
+        if self.rows_read >= self.height:
+            raise ImageIOError("StreamImageReader reached end of image")
+
+        rows_to_read: int = max_rows
+        rem: int = self.height - self.rows_read
+        if rows_to_read > rem:
+            rows_to_read = rem
+
+        bpp: int = self.pixel_format.bytes_per_pixel()
+        row_bytes: int = checked_mul(self.width, bpp)
+        need_bytes: int = checked_mul(rows_to_read, row_bytes)
+
+        buf: Buffer = Buffer(need_bytes)
+        got: int = 0
+        try:
+            while got < need_bytes:
+                chunk: str = self.reader.read_chunk(need_bytes - got)
+                clen: int = nox.strings.byte_len(chunk)
+                if clen == 0:
+                    raise CorruptDataError("unexpected EOF while streaming scanline strip")
+                cbuf: Buffer = nox.bytes.from_str(chunk)
+                i: int = 0
+                while i < clen and got < need_bytes:
+                    buf.set(got, cbuf.get(i))
+                    got = got + 1
+                    i = i + 1
+        except FsError as err:
+            raise ImageIOError("StreamImageReader failed reading strip: " + err.message)
+
+        self.rows_read = self.rows_read + rows_to_read
+        return Image.from_buffer(self.width, rows_to_read, row_bytes, self.pixel_format, buf, self.limits)
+
+    def close(self) -> None:
+
+        if not self.closed:
+            self.closed = True
+            self.reader.close()
+
+    def __enter__(self) -> StreamImageReader:
+
+        return self
+
+    def __exit__(self) -> None:
+
+        self.close()
+
+class StreamImageWriter:
+    """Windowed scanline writer for binary PPM (P6) and PGM (P5) with atomic commit & temp cleanup."""
+
+    target_path: str
+    temp_path: str
+    width: int
+    height: int
+    pixel_format: PixelFormat
+    rows_written: int
+    bytes_written: int
+    options: EncodeOptions
+    writer: FileWriter
+    committed: bool
+    aborted: bool
+
+    def __init__(self, target_path: str, temp_path: str, width: int, height: int, fmt: PixelFormat, bytes_written: int, opt: EncodeOptions, writer: FileWriter) -> None:
+        self.target_path = target_path
+        self.temp_path = temp_path
+        self.width = width
+        self.height = height
+        self.pixel_format = fmt
+        self.rows_written = 0
+        self.bytes_written = bytes_written
+        self.options = opt
+        self.writer = writer
+        self.committed = False
+        self.aborted = False
+
+    @staticmethod
+    def create(target_path: str, width: int, height: int, fmt: PixelFormat, opt: EncodeOptions) -> StreamImageWriter:
+
+        if target_path == "":
+            raise ImageIOError("StreamImageWriter target_path cannot be empty")
+        if not opt.overwrite and nox.fs.exists(target_path):
+            raise ImageIOError("refusing to overwrite existing file without overwrite=True: " + target_path)
+        if fmt != PixelFormat.RGB8 and fmt != PixelFormat.GRAY8:
+            raise UnsupportedPixelFormatError("StreamImageWriter supports RGB8 (PPM P6) and GRAY8 (PGM P5)")
+
+        bpp: int = fmt.bytes_per_pixel()
+        payload_bytes: int = opt.limits.validate_dimensions(width, height, bpp)
+        magic: str = "P6\n"
+        if fmt == PixelFormat.GRAY8:
+            magic = "P5\n"
+        hdr: str = magic + str(width) + " " + str(height) + "\n255\n"
+        hdr_len: int = nox.strings.byte_len(hdr)
+        opt.limits.validate_output_size(checked_add(hdr_len, payload_bytes))
+
+        tmp: str = target_path + ".prism-stream-tmp"
+        try:
+            fw: FileWriter = nox.fs.open_write(tmp)
+            fw.write(hdr)
+            return StreamImageWriter(target_path, tmp, width, height, fmt, hdr_len, opt, fw)
+        except FsError as err:
+            if nox.fs.exists(tmp):
+                try:
+                    nox.fs.remove_file(tmp)
+                except FsError:
+                    pass
+            raise ImageIOError("StreamImageWriter failed to initialize temp file: " + err.message)
+
+    def write_scanline_strip(self, strip: Image) -> None:
+
+        if self.committed or self.aborted:
+            raise ImageIOError("StreamImageWriter is already finalized")
+        if strip.width() != self.width:
+            raise DimensionError("strip width " + str(strip.width()) + " does not match stream width " + str(self.width))
+        if strip.pixel_format() != self.pixel_format:
+            raise UnsupportedPixelFormatError("strip pixel format does not match stream pixel format")
+        next_rows: int = checked_add(self.rows_written, strip.height())
+        if next_rows > self.height:
+            raise DimensionError("strip rows exceed total stream height " + str(self.height))
+
+        raw_buf: Buffer = strip.raw_bytes()
+        next_bytes: int = checked_add(self.bytes_written, raw_buf.len())
+        self.options.limits.validate_output_size(next_bytes)
+
+        try:
+            self.writer.write(nox.bytes.to_str(raw_buf))
+        except FsError as err:
+            self.abort()
+            raise ImageIOError("StreamImageWriter failed writing strip: " + err.message)
+
+        self.rows_written = next_rows
+        self.bytes_written = next_bytes
+
+    def commit(self) -> None:
+
+        if self.committed:
+            return
+        if self.aborted:
+            raise ImageIOError("cannot commit an aborted StreamImageWriter")
+        if self.rows_written != self.height:
+            self.abort()
+            raise ImageIOError("incomplete StreamImageWriter: wrote " + str(self.rows_written) + " of " + str(self.height) + " rows")
+
+        self.writer.close()
+        if not self.options.overwrite and nox.fs.exists(self.target_path):
+            self.abort()
+            raise ImageIOError("target file appeared before commit and overwrite=False: " + self.target_path)
+
+        try:
+            nox.fs.rename(self.temp_path, self.target_path)
+            self.committed = True
+        except FsError as err:
+            self.abort()
+            raise ImageIOError("StreamImageWriter atomic commit failed: " + err.message)
+
+    def abort(self) -> None:
+
+        if self.committed or self.aborted:
+            return
+        self.aborted = True
+        self.writer.close()
+        if nox.fs.exists(self.temp_path):
+            try:
+                nox.fs.remove_file(self.temp_path)
+            except FsError:
+                pass
+
+    def __enter__(self) -> StreamImageWriter:
+
+        return self
+
+    def __exit__(self) -> None:
+
+        if not self.committed:
+            self.abort()

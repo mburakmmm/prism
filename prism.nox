@@ -45,7 +45,9 @@ from pipeline.cache import CacheEntry, PlanCache
 from pipeline.executor import execute_graph_eager, execute_node_eager, execute_pipeline, execute_pipeline_cached, execute_plan
 from pipeline.graph import PipelineGraph
 from pipeline.nodes import PipelineFilterOp, PipelineNode, PipelineNodeKind
+from pipeline.parallel import BatchErrorPolicy, BatchItemResult, BatchProcessor, BatchResult, compute_batch_idempotency_key, execute_pipeline_parallel, execute_tiled_node_parallel, process_batch_images
 from pipeline.planner import ExecutionPlan, optimize_pipeline
+from pipeline.streaming import SpillManager, StreamImageReader, StreamImageWriter
 from pipeline.tiles import DEFAULT_TILE_SIZE, TileRect, compute_tile_grid, execute_tiled_node
 from transforms.affine import AffineMatrix2D, affine_transform
 from transforms.border import BorderMode, pad_image, pad_with_mode, sample_with_border
@@ -55,7 +57,7 @@ from transforms.resample import ResampleFilter, bicubic_weight, is_finite_float,
 from transforms.resize import ResizeFit, ResizeOptions, resize_exact, resize_image, resize_with_options, thumbnail
 from transforms.rotate import apply_exif_orientation, normalize_orientation, rotate90, rotate180, rotate270, rotate_arbitrary
 
-PRISM_VERSION: str = "0.9.0"
+PRISM_VERSION: str = "0.9.2"
 
 def prism_version() -> str:
     """Return the active Prism semantic version string."""

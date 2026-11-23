@@ -1,0 +1,25 @@
+from prism import BatchErrorPolicy, BatchItemResult, BatchProcessor, BatchResult, Image, PipelineGraph, Pixel, ResourceLimits, execute_pipeline, new_image, process_batch_images
+
+lim: ResourceLimits = ResourceLimits.default()
+images: list[Image] = [new_image(20, 20, Pixel.rgba(255, 0, 0, 255)), new_image(20, 20, Pixel.rgba(0, 255, 0, 255)), new_image(20, 20, Pixel.rgba(0, 0, 255, 255)), new_image(20, 20, Pixel.rgba(255, 255, 0, 255))]
+ids: list[str] = ["img_red", "img_green", "img_blue", "img_yellow"]
+
+g: PipelineGraph = PipelineGraph.empty()
+g = g.crop(2, 2, 16, 16)
+g = g.gaussian_blur(1.0, 1)
+g = g.brightness(10)
+
+proc: BatchProcessor = BatchProcessor(BatchErrorPolicy.FAIL_FAST, 8, "0.9.2", lim)
+batch_task: Task[BatchResult] = spawn process_batch_images(proc, ids, images, g)
+res: BatchResult = await batch_task
+
+assert res.succeeded_count == 4 and res.failed_count == 0, "all 4 batch items succeeded"
+i: int = 0
+while i < 4:
+    item: BatchItemResult = res.items[i]
+    assert item.index == i and item.item_id == ids[i], "deterministic item ordering"
+    expected: Image = execute_pipeline(images[i], g, 8)
+    assert item.output.pixel_equals(expected), "parallel batch output matches single-threaded output bit-exact"
+    i = i + 1
+
+print("batch-example-ok", res.succeeded_count, res.items[0].output.width(), res.items[0].output.height())

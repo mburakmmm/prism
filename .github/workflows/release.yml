@@ -54,7 +54,9 @@ jobs:
         run: |
           noxc check prism.nox
           noxc check --strict-spawn-shared prism.nox
+          noxc check --strict-spawn-shared pipeline/parallel.nox
           noxc check --strict-spawn-shared examples/capability_probe.nox
+          noxc check --strict-spawn-shared examples/batch.nox
 
       - name: Verify Freestanding Pure-NOX Core, Transform & Filter Modules
         run: |
@@ -125,6 +127,7 @@ jobs:
           noxc run examples/watermark.nox
           noxc run examples/animation_gif.nox
           noxc run examples/pipeline_demo.nox
+          noxc run examples/batch.nox
 
   create-release:
     name: Publish GitHub Release

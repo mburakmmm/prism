@@ -1,0 +1,183 @@
+import nox.bytes
+import nox.fs
+import nox.os
+import nox.path
+import nox.test
+from nox.buffer import Buffer
+from prism import BatchErrorPolicy, BatchItemResult, BatchProcessor, BatchResult, DecodeOptions, EncodeOptions, GrayscaleMode, Image, ImageIOError, MutableImage, PipelineGraph, PipelineNode, Pixel, PixelFormat, PrismError, ResourceLimitError, ResourceLimits, SpillManager, StreamImageReader, StreamImageWriter, compute_batch_idempotency_key, execute_pipeline, execute_pipeline_parallel, execute_tiled_node, execute_tiled_node_parallel, new_image, open_image, process_batch_images, save_image
+
+def _make_grad_img(w: int, h: int, fmt: PixelFormat) -> Image:
+    lim: ResourceLimits = ResourceLimits.default()
+    mut_img: MutableImage = MutableImage.create(w, h, fmt, Pixel.black(), lim)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            if fmt == PixelFormat.GRAY8:
+                mut_img.set_pixel(x, y, Pixel.gray(x * 13 + y * 29 & 255))
+            else:
+                mut_img.set_pixel(x, y, Pixel.rgb(x * 17 & 255, y * 19 & 255, (x + y) * 11 & 255))
+            x = x + 1
+        y = y + 1
+    return mut_img.to_image()
+
+def test_streaming_reader_writer_and_atomic_abort() -> None:
+    tmp_dir: str = nox.path.safe_join(nox.os.current_dir(), "tests/fixtures")
+    stream_path: str = nox.path.safe_join(tmp_dir, "prism_f11_stream.ppm")
+    if nox.fs.exists(stream_path):
+        nox.fs.remove_file(stream_path)
+    tmp_residual: str = stream_path + ".prism-stream-tmp"
+    if nox.fs.exists(tmp_residual):
+        nox.fs.remove_file(tmp_residual)
+
+    src: Image = _make_grad_img(16, 16, PixelFormat.RGB8)
+
+    # 1. Stream write in 4-row strips and atomic commit
+    sw: StreamImageWriter = StreamImageWriter.create(stream_path, 16, 16, PixelFormat.RGB8, EncodeOptions.overwrite_atomic())
+    r_y: int = 0
+    while r_y < 16:
+        strip_mut: MutableImage = MutableImage.create(16, 4, PixelFormat.RGB8, Pixel.black(), ResourceLimits.default())
+        sy: int = 0
+        while sy < 4:
+            sx: int = 0
+            while sx < 16:
+                strip_mut.set_pixel(sx, sy, src.get_pixel(sx, r_y + sy))
+                sx = sx + 1
+            sy = sy + 1
+        sw.write_scanline_strip(strip_mut.to_image())
+        r_y = r_y + 4
+    sw.commit()
+
+    nox.test.assert_true(nox.fs.exists(stream_path), "streamed file exists after commit")
+    nox.test.assert_true(not nox.fs.exists(tmp_residual), "temp file removed after atomic commit")
+
+    # Verify full-file decode matches original bit-exact
+    decoded_full: Image = open_image(stream_path, DecodeOptions.default())
+    nox.test.assert_true(decoded_full.pixel_equals(src), "streamed PPM matches full open_image bit-exact")
+
+    # 2. Stream read in 4-row strips via `with` protocol
+    row_offset: int = 0
+    with StreamImageReader.open(stream_path, DecodeOptions.default()) as sr:
+        nox.test.assert_eq_int(sr.width, 16, "StreamImageReader width == 16")
+        nox.test.assert_eq_int(sr.height, 16, "StreamImageReader height == 16")
+        while sr.has_more_rows():
+            chunk_img: Image = sr.read_scanline_strip(4)
+            cy: int = 0
+            while cy < chunk_img.height():
+                cx: int = 0
+                while cx < 16:
+                    nox.test.assert_true(chunk_img.get_pixel(cx, cy).equals(src.get_pixel(cx, row_offset + cy)), "streamed pixel match")
+                    cx = cx + 1
+                cy = cy + 1
+            row_offset = row_offset + chunk_img.height()
+    nox.test.assert_eq_int(row_offset, 16, "StreamImageReader consumed all 16 rows")
+
+    # 3. Incomplete stream commit/abort must preserve existing target and clean temp file
+    bad_sw: StreamImageWriter = StreamImageWriter.create(stream_path, 16, 16, PixelFormat.RGB8, EncodeOptions.overwrite_atomic())
+    bad_strip: Image = MutableImage.create(16, 4, PixelFormat.RGB8, Pixel.black(), ResourceLimits.default()).to_image()
+    bad_sw.write_scanline_strip(bad_strip)
+    incomplete_err: bool = False
+    try:
+        bad_sw.commit()
+    except ImageIOError:
+        incomplete_err = True
+    nox.test.assert_true(incomplete_err, "incomplete stream commit raises ImageIOError")
+    nox.test.assert_true(not nox.fs.exists(tmp_residual), "temp file cleaned up after incomplete stream abort")
+    intact_img: Image = open_image(stream_path, DecodeOptions.default())
+    nox.test.assert_true(intact_img.pixel_equals(src), "failed stream commit never corrupts existing file")
+
+    nox.fs.remove_file(stream_path)
+
+def test_spill_manager_quota_and_cleanup() -> None:
+    tmp_dir: str = nox.path.safe_join(nox.os.current_dir(), "tests/fixtures")
+    # Small 100-byte temp quota
+    tight_lim: ResourceLimits = ResourceLimits(1024, 1024, 1000000, 1048576, 1048576, 10, 4096, 65536, 8, 1048576, 100, 1000)
+    mgr: SpillManager = SpillManager.create(tmp_dir, tight_lim)
+
+    b1: Buffer = nox.bytes.from_str("0123456789ABCDEF0123456789ABCDEF")
+    p1: str = mgr.spill_buffer("prism_f11_tile", b1)
+    nox.test.assert_true(nox.fs.exists(p1), "spill file created on disk")
+    nox.test.assert_eq_int(mgr.used_temp_bytes, 32, "used_temp_bytes tracked")
+
+    read_b1: Buffer = mgr.read_spill(p1)
+    nox.test.assert_eq_int(read_b1.len(), 32, "spill read-back length match")
+
+    # Traversal label blocked
+    trav_err: bool = False
+    try:
+        mgr.spill_buffer("../escape", b1)
+    except ImageIOError:
+        trav_err = True
+    nox.test.assert_true(trav_err, "SpillManager blocks ../ path traversal")
+
+    # Exceeding 100-byte quota blocked
+    big_b: Buffer = Buffer(80)
+    quota_err: bool = False
+    try:
+        mgr.spill_buffer("overflow", big_b)
+    except ResourceLimitError:
+        quota_err = True
+    nox.test.assert_true(quota_err, "SpillManager enforces max_temp_bytes quota")
+
+    cleaned: int = mgr.cleanup()
+    nox.test.assert_eq_int(cleaned, 1, "cleanup removed 1 spill file")
+    nox.test.assert_true(not nox.fs.exists(p1), "spill file removed after cleanup")
+    nox.test.assert_eq_int(mgr.used_temp_bytes, 0, "used_temp_bytes reset to 0")
+
+async def test_parallel_tiling_and_batch_processor() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+    src: Image = _make_grad_img(24, 24, PixelFormat.RGB8)
+
+    # 1. Parallel execute_tiled_node_parallel vs single-threaded execute_tiled_node (bit-exact)
+    nd: PipelineNode = PipelineNode.gaussian_blur(1.1, 2)
+    single_tile: Image = execute_tiled_node(src, nd, 8)
+    pt_task: Task[Image] = spawn execute_tiled_node_parallel(src, nd, 8)
+    par_tile: Image = await pt_task
+    nox.test.assert_true(par_tile.pixel_equals(single_tile), "parallel tiled gaussian_blur bit-exact with sequential")
+
+    # 2. Parallel execute_pipeline_parallel vs execute_pipeline (bit-exact)
+    g: PipelineGraph = PipelineGraph.empty()
+    g = g.gaussian_blur(1.0, 1)
+    g = g.sharpen(0.8)
+    g = g.grayscale(GrayscaleMode.SRGB_LUMA)
+    seq_pipe: Image = execute_pipeline(src, g, 8)
+    pp_task: Task[Image] = spawn execute_pipeline_parallel(src, g, 8)
+    par_pipe: Image = await pp_task
+    nox.test.assert_true(par_pipe.pixel_equals(seq_pipe), "parallel pipeline execution bit-exact with sequential")
+
+    # 3. Deterministic BatchProcessor (COLLECT_ERRORS mixing valid and oversized-crop failing item)
+    ok_img: Image = _make_grad_img(16, 16, PixelFormat.RGB8)
+    too_small_img: Image = _make_grad_img(4, 4, PixelFormat.RGB8)
+    g_crop: PipelineGraph = PipelineGraph.empty()
+    g_crop = g_crop.crop(2, 2, 8, 8)
+    g_crop = g_crop.invert()
+
+    proc_collect: BatchProcessor = BatchProcessor(BatchErrorPolicy.COLLECT_ERRORS, 6, "0.9.2", lim)
+    b_task: Task[BatchResult] = spawn process_batch_images(proc_collect, ["a_ok", "b_fail", "c_ok"], [ok_img, too_small_img, ok_img], g_crop)
+    b_res: BatchResult = await b_task
+
+    nox.test.assert_eq_int(b_res.succeeded_count, 2, "COLLECT_ERRORS succeeded_count == 2")
+    nox.test.assert_eq_int(b_res.failed_count, 1, "COLLECT_ERRORS failed_count == 1")
+    nox.test.assert_true(b_res.items[0].succeeded and not b_res.items[1].succeeded and b_res.items[2].succeeded, "deterministic item positions")
+    nox.test.assert_true(b_res.items[0].output.pixel_equals(execute_pipeline(ok_img, g_crop, 6)), "batch item 0 output bit-exact")
+
+    # Deterministic idempotency keys
+    k_ok1: str = compute_batch_idempotency_key("a_ok", ok_img, "fp1", "0.9.2")
+    k_ok2: str = compute_batch_idempotency_key("a_ok", ok_img.clone(), "fp1", "0.9.2")
+    nox.test.assert_eq_str(k_ok1, k_ok2, "idempotency key deterministic across image clone")
+
+    # 4. FAIL_FAST propagates first error
+    proc_ff: BatchProcessor = BatchProcessor(BatchErrorPolicy.FAIL_FAST, 6, "0.9.2", lim)
+    ff_caught: bool = False
+    try:
+        ff_task: Task[BatchResult] = spawn process_batch_images(proc_ff, ["b_fail"], [too_small_img], g_crop)
+        await ff_task
+    except PrismError:
+        ff_caught = True
+    nox.test.assert_true(ff_caught, "FAIL_FAST raises PrismError on failing item")
+
+test_streaming_reader_writer_and_atomic_abort()
+test_spill_manager_quota_and_cleanup()
+async_t: Task[None] = spawn test_parallel_tiling_and_batch_processor()
+await async_t
+print("streaming_parallel_test-ok")

@@ -1,0 +1,212 @@
+from nox.tasks import TaskGroup, TaskHandle
+from core.errors import DimensionError, InvalidImageError, PipelineError, PrismError
+from core.image import Image, MutableImage
+from core.limits import ResourceLimits
+from core.pixel import Pixel
+from pipeline.cache import PlanCache
+from pipeline.executor import execute_plan
+from pipeline.graph import PipelineGraph
+from pipeline.nodes import PipelineNode
+from pipeline.planner import ExecutionPlan, optimize_pipeline
+from pipeline.tiles import TileRect, apply_pipeline_node, compute_tile_grid
+from transforms.crop import crop_image
+
+__all__: list[str] = ["BatchErrorPolicy", "BatchItemResult", "BatchResult", "compute_batch_idempotency_key", "execute_tiled_node_parallel", "execute_pipeline_parallel", "BatchProcessor", "process_batch_images"]
+
+enum BatchErrorPolicy:
+    FAIL_FAST
+    COLLECT_ERRORS
+
+    def name(self) -> str:
+        match self:
+            case BatchErrorPolicy.FAIL_FAST:
+                return "FAIL_FAST"
+            case BatchErrorPolicy.COLLECT_ERRORS:
+                return "COLLECT_ERRORS"
+
+class BatchItemResult:
+    """Deterministic result record for one item in a BatchProcessor run."""
+
+    index: int
+    item_id: str
+    idempotency_key: str
+    succeeded: bool
+    error_message: str
+    output: Image
+    has_output: bool
+
+    def __init__(self, index: int, item_id: str, idempotency_key: str, succeeded: bool, error_message: str, output: Image, has_output: bool) -> None:
+        self.index = index
+        self.item_id = item_id
+        self.idempotency_key = idempotency_key
+        self.succeeded = succeeded
+        self.error_message = error_message
+        self.output = output
+        self.has_output = has_output
+
+class BatchResult:
+    """Ordered aggregate result produced by BatchProcessor."""
+
+    items: list[BatchItemResult]
+    succeeded_count: int
+    failed_count: int
+
+    def __init__(self, items: list[BatchItemResult], succeeded_count: int, failed_count: int) -> None:
+        self.items = items
+        self.succeeded_count = succeeded_count
+        self.failed_count = failed_count
+
+def compute_batch_idempotency_key(item_id: str, img: Image, plan_fingerprint: str, version: str) -> str:
+    """Compute a deterministic idempotency key from item_id, input CRC32/dims, plan fingerprint, and version."""
+    return item_id + "|" + PlanCache.make_cache_key(img, plan_fingerprint, version)
+
+def _clone_node(nd: PipelineNode) -> PipelineNode:
+    return PipelineNode(nd.kind, nd.i0, nd.i1, nd.i2, nd.i3, nd.f0, nd.f1, nd.color_target, nd.resample_filter, nd.filter_op, Pixel.rgba(nd.pixel_param.r, nd.pixel_param.g, nd.pixel_param.b, nd.pixel_param.a), nd.format_param, nd.requires_materialization, nd.halo_radius)
+
+def _clone_plan(plan: ExecutionPlan) -> ExecutionPlan:
+    cloned_nodes: list[PipelineNode] = []
+    i: int = 0
+    while i < len(plan.optimized_nodes):
+        cloned_nodes.append(_clone_node(plan.optimized_nodes[i]))
+        i = i + 1
+    return ExecutionPlan(plan.original_count, cloned_nodes, plan.optimizations_applied, plan.requires_materialization, plan.fingerprint)
+
+def _copy_tile_interior(dst_mut: MutableImage, src_tile: Image, src_x: int, src_y: int, dst_x: int, dst_y: int, w: int, h: int) -> None:
+    py: int = 0
+    while py < h:
+        px_x: int = 0
+        while px_x < w:
+            dst_mut.set_pixel(dst_x + px_x, dst_y + py, src_tile.get_pixel(src_x + px_x, src_y + py))
+            px_x = px_x + 1
+        py = py + 1
+
+async def _run_tile_worker(src_tile: Image, node: PipelineNode) -> Image:
+    return apply_pipeline_node(src_tile, node)
+
+async def execute_tiled_node_parallel(img: Image, node: PipelineNode, tile_size: int) -> Image:
+    """Execute a tileable node across disjoint halo-padded tiles in parallel using NOX spawn."""
+    if not node.is_tileable():
+        raise PipelineError("node kind " + node.kind.name() + " requires full-image materialization and cannot be tiled")
+    if tile_size < 1:
+        raise DimensionError("execute_tiled_node_parallel tile_size must be >= 1")
+
+    local_img: Image = img.clone()
+    w: int = local_img.width()
+    h: int = local_img.height()
+    tiles: list[TileRect] = compute_tile_grid(w, h, tile_size, node.halo_radius)
+    if len(tiles) == 0:
+        local_nd0: PipelineNode = PipelineNode(node.kind, node.i0, node.i1, node.i2, node.i3, node.f0, node.f1, node.color_target, node.resample_filter, node.filter_op, Pixel.rgba(node.pixel_param.r, node.pixel_param.g, node.pixel_param.b, node.pixel_param.a), node.format_param, node.requires_materialization, node.halo_radius)
+        return apply_pipeline_node(local_img, local_nd0)
+
+    grp: TaskGroup[Image] = TaskGroup[Image]()
+    i: int = 0
+    while i < len(tiles):
+        t: TileRect = tiles[i]
+        src_crop: Image = crop_image(local_img, t.x - t.halo_left, t.y - t.halo_top, t.w + t.halo_left + t.halo_right, t.h + t.halo_top + t.halo_bottom)
+        tile_nd: PipelineNode = PipelineNode(node.kind, node.i0, node.i1, node.i2, node.i3, node.f0, node.f1, node.color_target, node.resample_filter, node.filter_op, Pixel.rgba(node.pixel_param.r, node.pixel_param.g, node.pixel_param.b, node.pixel_param.a), node.format_param, node.requires_materialization, node.halo_radius)
+        grp.add(spawn _run_tile_worker(src_crop, tile_nd))
+        i = i + 1
+
+    tile_outputs: list[Image] = []
+    handles: list[TaskHandle[Image]] = grp.handles()
+    j: int = 0
+    while j < len(handles):
+        tile_res: Image = await handles[j].task
+        tile_outputs.append(tile_res)
+        j = j + 1
+
+    first_out: Image = tile_outputs[0]
+    out_mut: MutableImage = MutableImage.create(w, h, first_out.pixel_format(), Pixel.transparent(), local_img.limits)
+    k: int = 0
+    while k < len(tiles):
+        tr: TileRect = tiles[k]
+        _copy_tile_interior(out_mut, tile_outputs[k], tr.halo_left, tr.halo_top, tr.x, tr.y, tr.w, tr.h)
+        k = k + 1
+
+    res: Image = out_mut.to_image()
+    res.color_space = first_out.color_space
+    res.alpha_mode = first_out.alpha_mode
+    res.metadata = local_img.metadata.clone()
+    return res
+
+async def execute_pipeline_parallel(img: Image, graph: PipelineGraph, tile_size: int) -> Image:
+    """Optimize `graph` and run tileable nodes via `execute_tiled_node_parallel`."""
+    local_nodes: list[PipelineNode] = []
+    gi: int = 0
+    while gi < len(graph.nodes):
+        src_nd: PipelineNode = graph.nodes[gi]
+        local_nodes.append(PipelineNode(src_nd.kind, src_nd.i0, src_nd.i1, src_nd.i2, src_nd.i3, src_nd.f0, src_nd.f1, src_nd.color_target, src_nd.resample_filter, src_nd.filter_op, Pixel.rgba(src_nd.pixel_param.r, src_nd.pixel_param.g, src_nd.pixel_param.b, src_nd.pixel_param.a), src_nd.format_param, src_nd.requires_materialization, src_nd.halo_radius))
+        gi = gi + 1
+    plan: ExecutionPlan = optimize_pipeline(PipelineGraph(local_nodes))
+    cur: Image = img.clone()
+    i: int = 0
+    while i < len(plan.optimized_nodes):
+        nd: PipelineNode = plan.optimized_nodes[i]
+        if tile_size > 0 and nd.is_tileable() and (cur.width() > tile_size or cur.height() > tile_size):
+            t_tile: Task[Image] = spawn execute_tiled_node_parallel(cur, _clone_node(nd), tile_size)
+            cur = await t_tile
+        else:
+            cur = apply_pipeline_node(cur, nd)
+        i = i + 1
+    return cur
+
+async def _run_batch_item_worker(index: int, item_id: str, idemp_key: str, img: Image, plan: ExecutionPlan, tile_size: int, fail_fast: bool) -> BatchItemResult:
+    try:
+        out_img: Image = execute_plan(img, plan, tile_size)
+        return BatchItemResult(index, item_id, idemp_key, True, "", out_img, True)
+    except PrismError as err:
+        if fail_fast:
+            raise err
+        return BatchItemResult(index, item_id, idemp_key, False, err.message, img, False)
+
+class BatchProcessor:
+    """Deterministic parallel batch execution engine with idempotency keys and configurable error policy."""
+
+    policy: BatchErrorPolicy
+    tile_size: int
+    version: str
+    limits: ResourceLimits
+
+    def __init__(self, policy: BatchErrorPolicy, tile_size: int, version: str, lim: ResourceLimits) -> None:
+        if tile_size < 0:
+            raise DimensionError("BatchProcessor tile_size must be non-negative")
+        self.policy = policy
+        self.tile_size = tile_size
+        self.version = version
+        self.limits = lim
+
+async def process_batch_images(proc: BatchProcessor, item_ids: list[str], images: list[Image], graph: PipelineGraph) -> BatchResult:
+    """Execute a deterministic parallel batch across `images` via NOX spawn/TaskGroup under `proc.policy`."""
+    n: int = len(images)
+    if len(item_ids) != n:
+        raise InvalidImageError("BatchProcessor item_ids and images lengths must match")
+    if n == 0:
+        return BatchResult([], 0, 0)
+
+    plan: ExecutionPlan = optimize_pipeline(graph)
+    fail_fast: bool = proc.policy == BatchErrorPolicy.FAIL_FAST
+
+    grp: TaskGroup[BatchItemResult] = TaskGroup[BatchItemResult]()
+    i: int = 0
+    while i < n:
+        img_item: Image = images[i]
+        id_str: str = item_ids[i]
+        ikey: str = compute_batch_idempotency_key(id_str, img_item, plan.fingerprint, proc.version)
+        grp.add(spawn _run_batch_item_worker(i, id_str, ikey, img_item.clone(), _clone_plan(plan), proc.tile_size, fail_fast))
+        i = i + 1
+
+    results: list[BatchItemResult] = []
+    ok_cnt: int = 0
+    err_cnt: int = 0
+    handles: list[TaskHandle[BatchItemResult]] = grp.handles()
+    j: int = 0
+    while j < len(handles):
+        item_res: BatchItemResult = await handles[j].task
+        if item_res.succeeded:
+            ok_cnt = ok_cnt + 1
+        else:
+            err_cnt = err_cnt + 1
+        results.append(item_res)
+        j = j + 1
+
+    return BatchResult(results, ok_cnt, err_cnt)

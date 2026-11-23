@@ -2,6 +2,16 @@
 
 All notable changes to Prism are documented in this file. Prism follows Semantic Versioning (`0.x` experimental phase gates leading to `1.0.0`).
 
+## [0.8.5] — 2026-11-23 (Phase F9 Animation Model, Timeline Compositor & Pure-NOX GIF Engine)
+
+### Added
+
+- `docs/nox-limitations.md`: Comprehensive field report of empirically verified `noxc 2.2.38` compiler, syntax, stdlib, and freestanding limitations alongside Prism's workarounds.
+- `animation/frame.nox` & `animation/timeline.nox`: `DisposalMethod` (`NONE`, `KEEP`, `RESTORE_BACKGROUND`, `RESTORE_PREVIOUS`), `FrameBlend` (`SOURCE`, `OVER`), `Frame`, `Animation` (enforcing `max_frames`, `offset + width/height`, and total `frames * w * h * 4 <= max_decoded_bytes`), delay normalization (`normalize_frame_delay_ms`), and `Timeline.render_frames()` full-canvas frame compositor.
+- `codecs/gif.nox` & `animation/gif.nox`: Pure-NOX GIF87a/GIF89a variable-width LSB LZW decompressor & hash-table compressor (`gif_lzw_decompress`, `gif_lzw_compress`), header prober (`probe_gif`), multi-frame/interlaced/GCE/NETSCAPE2.0 decoder (`decode_gif_animation`, `decode_gif`, `render_gif_frames`), and lossless-up-to-255-color / 6x6x6-cube GIF89a encoder (`encode_gif_animation`, `encode_gif`).
+- `codecs/registry.nox`, `codecs/reader.nox`, `codecs/writer.nox`, `prism.nox`: Activated GIF probing, decoding, and encoding across `probe`, `decode`, `encode`, and `list_codec_capabilities`.
+- `examples/animation_gif.nox` & `tests/codecs/gif_animation_test.nox`: Multi-frame animated GIF showcase and unit/disposal-golden/120-frame/corruption test suite verified on LLVM, QBE, and `--profile freestanding`.
+
 ## [0.8.0] — 2026-11-23 (Phase F8 Optional Native Codec Adapters & Pure-NOX Header Probing)
 
 ### Added

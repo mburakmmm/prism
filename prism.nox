@@ -1,7 +1,11 @@
 from adapters.file import open_image, open_image_confined, probe_file, save_image, save_image_as, save_image_confined
 from adapters.memory import decode, encode, probe
+from animation.frame import Animation, DEFAULT_NORMALIZED_DELAY_MS, DisposalMethod, Frame, FrameBlend, MIN_FRAME_DELAY_MS, disposal_from_code, normalize_frame_delay_ms
+from animation.gif import render_gif_frames
+from animation.timeline import Timeline, render_animation_frames
 from codecs.bmp import decode_bmp, encode_bmp, open_bmp, probe_bmp, save_bmp
 from codecs.deflate import adler32_bytes, crc32_bytes, crc32_span, zlib_compress, zlib_decompress
+from codecs.gif import decode_gif, decode_gif_animation, encode_gif, encode_gif_animation, gif_lzw_compress, gif_lzw_decompress, probe_gif
 from codecs.jpeg_adapter import JpegSubsampling, decode_jpeg, encode_jpeg, is_native_jpeg_available, probe_jpeg, validate_jpeg_encode_options
 from codecs.pgm import decode_pgm, encode_pgm, open_pgm, probe_pgm, save_pgm
 from codecs.png import decode_png, encode_png, open_png, paeth_predictor, probe_png, save_png
@@ -45,7 +49,7 @@ from transforms.resample import ResampleFilter, bicubic_weight, is_finite_float,
 from transforms.resize import ResizeFit, ResizeOptions, resize_exact, resize_image, resize_with_options, thumbnail
 from transforms.rotate import apply_exif_orientation, normalize_orientation, rotate90, rotate180, rotate270, rotate_arbitrary
 
-PRISM_VERSION: str = "0.8.0"
+PRISM_VERSION: str = "0.8.5"
 
 def prism_version() -> str:
     """Return the active Prism semantic version string."""

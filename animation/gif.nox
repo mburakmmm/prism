@@ -1,0 +1,13 @@
+from nox.buffer import Buffer
+from animation.frame import Animation
+from animation.timeline import render_animation_frames
+from codecs.gif import decode_gif_animation
+from core.image import Image
+from core.options import DecodeOptions
+
+__all__: list[str] = ["render_gif_frames"]
+
+def render_gif_frames(data: Buffer, opt: DecodeOptions) -> list[Image]:
+    """Decode a GIF87a/GIF89a Buffer and composite all delta/disposal frames into full RGBA8 Images."""
+    anim: Animation = decode_gif_animation(data, opt)
+    return render_animation_frames(anim)

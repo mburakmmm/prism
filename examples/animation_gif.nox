@@ -1,0 +1,34 @@
+from nox.buffer import Buffer
+from prism import Animation, Canvas, DecodeOptions, DisposalMethod, EncodeOptions, Frame, FrameBlend, Image, ImageInfo, ImageMetadata, Pixel, ResourceLimits, Timeline, decode_gif_animation, encode_gif_animation, fill_circle, fill_rect, probe, render_gif_frames
+
+lim: ResourceLimits = ResourceLimits.default()
+
+# Build 3 animated frames on a 32x32 canvas with transparency & RESTORE_BACKGROUND disposal
+frames: list[Frame] = []
+xs: list[int] = [6, 16, 26]
+colors: list[Pixel] = [Pixel.rgba(239, 68, 68, 255), Pixel.rgba(34, 197, 94, 255), Pixel.rgba(59, 130, 246, 255)]
+
+i: int = 0
+while i < 3:
+    c: Canvas = Canvas.create(32, 32, Pixel.transparent(), lim)
+    fill_rect(c, 0, 26, 32, 6, Pixel.rgba(15, 23, 42, 255))
+    fill_circle(c, xs[i], 14, 5, colors[i])
+    frames.append(Frame(c.to_image(), 120, 0, 0, DisposalMethod.RESTORE_BACKGROUND, FrameBlend.OVER))
+    i = i + 1
+
+anim: Animation = Animation(32, 32, frames, 0, Pixel.transparent(), ImageMetadata.default(), lim)
+gif_bytes: Buffer = encode_gif_animation(anim, EncodeOptions.default())
+
+info: ImageInfo = probe(gif_bytes, DecodeOptions.default())
+assert info.format_name == "GIF" and info.frame_count == 3, "GIF probe metadata match"
+
+decoded_anim: Animation = decode_gif_animation(gif_bytes, DecodeOptions.default())
+assert decoded_anim.frame_count() == 3 and decoded_anim.loop_count == 0, "GIF decode metadata match"
+
+rendered: list[Image] = render_gif_frames(gif_bytes, DecodeOptions.default())
+assert len(rendered) == 3, "rendered frame count == 3"
+assert rendered[0].get_pixel(6, 14).equals(colors[0]), "frame 0 circle pixel match"
+assert rendered[1].get_pixel(16, 14).equals(colors[1]), "frame 1 circle pixel match"
+assert rendered[2].get_pixel(26, 14).equals(colors[2]), "frame 2 circle pixel match"
+
+print("animation-gif-ok", info.width, info.height, info.frame_count, decoded_anim.total_duration_ms())

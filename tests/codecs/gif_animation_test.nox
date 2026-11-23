@@ -1,0 +1,133 @@
+import nox.bytes
+import nox.test
+from nox.buffer import Buffer
+from prism import Animation, CorruptDataError, DecodeOptions, DimensionError, DisposalMethod, EncodeOptions, Frame, FrameBlend, Image, ImageInfo, ImageMetadata, MutableImage, Pixel, PixelFormat, ResourceLimitError, ResourceLimits, Timeline, decode, decode_gif, decode_gif_animation, encode, encode_gif, encode_gif_animation, gif_lzw_compress, gif_lzw_decompress, new_image, normalize_frame_delay_ms, probe, probe_gif, render_animation_frames, render_gif_frames
+
+def test_lzw_roundtrip_and_delay_normalization() -> None:
+    # 1. LZW dictionary reset (> 4096 codes) lossless round-trip
+    raw_indices: list[int] = []
+    i: int = 0
+    while i < 12000:
+        raw_indices.append(i * 17 + i // 31 & 255)
+        i = i + 1
+    comp: list[int] = gif_lzw_compress(raw_indices, 8)
+    decomp: list[int] = gif_lzw_decompress(comp, 8, len(raw_indices))
+    nox.test.assert_eq_int(len(decomp), len(raw_indices), "LZW long stream length match")
+    j: int = 0
+    while j < len(raw_indices):
+        nox.test.assert_eq_int(decomp[j], raw_indices[j], "LZW round-trip byte match at " + str(j))
+        j = j + 37
+
+    # 2. Delay normalization (0ms -> 100ms, 10ms -> 100ms, 60ms -> 60ms)
+    nox.test.assert_eq_int(normalize_frame_delay_ms(0), 100, "0ms delay normalized to 100ms")
+    nox.test.assert_eq_int(normalize_frame_delay_ms(10), 100, "10ms delay normalized to 100ms")
+    nox.test.assert_eq_int(normalize_frame_delay_ms(60), 60, "60ms delay preserved")
+
+def test_still_and_animated_gif_disposal_modes() -> None:
+    lim: ResourceLimits = ResourceLimits.default()
+
+    # 1. Still GIF round-trip via unified encode/decode API
+    still_mut: MutableImage = MutableImage.create(6, 4, PixelFormat.RGBA8, Pixel.rgba(10, 20, 30, 255), lim)
+    still_mut.set_pixel(2, 1, Pixel.rgba(250, 120, 40, 255))
+    still_mut.set_pixel(5, 3, Pixel.transparent())
+    still_src: Image = still_mut.to_image()
+
+    still_buf: Buffer = encode(still_src, "GIF", EncodeOptions.default())
+    still_info: ImageInfo = probe(still_buf, DecodeOptions.default())
+    nox.test.assert_eq_str(still_info.format_name, "GIF", "still GIF format_name")
+    nox.test.assert_eq_int(still_info.frame_count, 1, "still GIF frame_count == 1")
+    still_dec: Image = decode(still_buf, DecodeOptions.default())
+    nox.test.assert_true(still_dec.pixel_equals(still_src), "still GIF lossless pixel round-trip with transparency")
+
+    # 2. Disposal modes golden test: KEEP vs RESTORE_BACKGROUND vs RESTORE_PREVIOUS
+    red: Pixel = Pixel.rgba(255, 0, 0, 255)
+    green: Pixel = Pixel.rgba(0, 255, 0, 255)
+    blue: Pixel = Pixel.rgba(0, 0, 255, 255)
+    bg: Pixel = Pixel.rgba(20, 20, 20, 255)
+
+    # Frame 0: full 4x4 red canvas, KEEP
+    f0_img: Image = new_image(4, 4, red)
+    f0: Frame = Frame(f0_img, 40, 0, 0, DisposalMethod.KEEP, FrameBlend.OVER)
+
+    # Frame 1: 2x2 patch at (1, 1) green (transparent corner (0,0)), RESTORE_PREVIOUS
+    f1_mut: MutableImage = MutableImage.create(2, 2, PixelFormat.RGBA8, green, lim)
+    f1_mut.set_pixel(0, 0, Pixel.transparent())
+    f1: Frame = Frame(f1_mut.to_image(), 60, 1, 1, DisposalMethod.RESTORE_PREVIOUS, FrameBlend.OVER)
+
+    # Frame 2: 2x2 patch at (1, 1) with transparent (0,0) and blue elsewhere -> because f1 had RESTORE_PREVIOUS,
+    # pixel (1,1) underneath transparent (0,0) in f2 must revert to RED from f0!
+    f2_mut: MutableImage = MutableImage.create(2, 2, PixelFormat.RGBA8, blue, lim)
+    f2_mut.set_pixel(0, 0, Pixel.transparent())
+    f2: Frame = Frame(f2_mut.to_image(), 80, 1, 1, DisposalMethod.RESTORE_BACKGROUND, FrameBlend.OVER)
+
+    # Frame 3: 1x1 blue at (0, 0) -> after f2 RESTORE_BACKGROUND, (1, 1) must be restored to bg
+    f3: Frame = Frame(new_image(1, 1, blue), 100, 0, 0, DisposalMethod.KEEP, FrameBlend.OVER)
+
+    anim: Animation = Animation(4, 4, [f0, f1, f2, f3], 3, bg, ImageMetadata.default(), lim)
+    gif_anim_buf: Buffer = encode_gif_animation(anim, EncodeOptions.default())
+    dec_anim: Animation = decode_gif_animation(gif_anim_buf, DecodeOptions.default())
+    nox.test.assert_eq_int(dec_anim.frame_count(), 4, "decoded animated GIF frame_count == 4")
+    nox.test.assert_eq_int(dec_anim.loop_count, 3, "decoded NETSCAPE2.0 loop_count == 3")
+
+    frames_out: list[Image] = render_gif_frames(gif_anim_buf, DecodeOptions.default())
+    nox.test.assert_eq_int(len(frames_out), 4, "rendered 4 frames")
+    nox.test.assert_true(frames_out[1].get_pixel(1, 1).equals(red), "frame 1 transparent pixel keeps f0 red")
+    nox.test.assert_true(frames_out[1].get_pixel(2, 2).equals(green), "frame 1 opaque green pixel")
+    nox.test.assert_true(frames_out[2].get_pixel(1, 1).equals(red), "frame 2 sees red restored by f1 RESTORE_PREVIOUS")
+    nox.test.assert_true(frames_out[2].get_pixel(2, 2).equals(blue), "frame 2 opaque blue pixel")
+    nox.test.assert_true(frames_out[3].get_pixel(2, 2).equals(bg), "frame 3 sees background restored by f2 RESTORE_BACKGROUND")
+
+def test_gif_limits_120_frames_and_negative_corruption() -> None:
+    # 1. 120-frame animation encode/decode and max_frames enforcement
+    lim_200: ResourceLimits = ResourceLimits.default()
+    many_frames: list[Frame] = []
+    fi: int = 0
+    while fi < 120:
+        clr: Pixel = Pixel.rgb(fi * 2 & 255, fi * 5 & 255, 255 - fi & 255)
+        many_frames.append(Frame.simple(new_image(2, 2, clr), 30))
+        fi = fi + 1
+    big_anim: Animation = Animation(2, 2, many_frames, 0, Pixel.black(), ImageMetadata.default(), lim_200)
+    big_gif: Buffer = encode_gif_animation(big_anim, EncodeOptions.default())
+
+    p_info: ImageInfo = probe_gif(big_gif, DecodeOptions.default())
+    nox.test.assert_eq_int(p_info.frame_count, 120, "120-frame GIF probe count")
+    dec_120: Animation = decode_gif_animation(big_gif, DecodeOptions.default())
+    nox.test.assert_eq_int(dec_120.frame_count(), 120, "120-frame GIF decoded")
+
+    # Enforce strict_server max_frames (50 < 120)
+    lim_50: ResourceLimits = ResourceLimits.strict_server()
+    max_f_caught: bool = False
+    try:
+        decode_gif_animation(big_gif, DecodeOptions.with_limits(lim_50))
+    except ResourceLimitError:
+        max_f_caught = True
+    nox.test.assert_true(max_f_caught, "120-frame GIF rejected by strict_server max_frames=50")
+
+    # 2. Out-of-bounds frame offset rejected with DimensionError
+    oob_caught: bool = False
+    try:
+        Animation(4, 4, [Frame(new_image(3, 3, Pixel.white()), 50, 2, 0, DisposalMethod.KEEP, FrameBlend.SOURCE)], 0, Pixel.black(), ImageMetadata.default(), lim_200)
+    except DimensionError:
+        oob_caught = True
+    nox.test.assert_true(oob_caught, "frame offset + width exceeding canvas rejected")
+
+    # 3. Corrupt LZW bitstream rejected with CorruptDataError
+    bad_lzw: bool = False
+    try:
+        gif_lzw_decompress([255, 255, 255], 8, 4)
+    except CorruptDataError:
+        bad_lzw = True
+    nox.test.assert_true(bad_lzw, "corrupt LZW stream rejected with CorruptDataError")
+
+    # 4. Truncated GIF header rejected with CorruptDataError
+    bad_hdr: bool = False
+    try:
+        probe_gif(nox.bytes.from_str("GIF89a\x04\x00"), DecodeOptions.default())
+    except CorruptDataError:
+        bad_hdr = True
+    nox.test.assert_true(bad_hdr, "truncated GIF header rejected with CorruptDataError")
+
+test_lzw_roundtrip_and_delay_normalization()
+test_still_and_animated_gif_disposal_modes()
+test_gif_limits_120_frames_and_negative_corruption()
+print("gif_animation_test-ok")

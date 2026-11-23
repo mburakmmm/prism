@@ -22,7 +22,7 @@ class CodecCapability:
 
 def list_codec_capabilities() -> list[CodecCapability]:
     """Return the active codec capability table for the current Prism build."""
-    return [CodecCapability(ImageFormat.PPM, "PPM", True, True, True, "pure-nox (P6 8-bit RGB)"), CodecCapability(ImageFormat.PGM, "PGM", True, True, True, "pure-nox (P5 8-bit Gray)"), CodecCapability(ImageFormat.BMP, "BMP", True, True, True, "pure-nox (24/32-bit uncompressed BI_RGB)"), CodecCapability(ImageFormat.PNG, "PNG", True, True, True, "pure-nox (8-bit Gray/RGB/RGBA/Palette+tRNS, RFC 1950/1951)"), CodecCapability(ImageFormat.JPEG, "JPEG", True, False, False, "pure-nox probe + optional-native-f8 decode/encode"), CodecCapability(ImageFormat.WEBP, "WEBP", True, False, False, "pure-nox probe + optional-native-f8 decode/encode"), CodecCapability(ImageFormat.GIF, "GIF", False, False, False, "planned-f9 (animation)"), CodecCapability(ImageFormat.TIFF, "TIFF", True, False, False, "pure-nox probe + optional-native-f8 decode/encode")]
+    return [CodecCapability(ImageFormat.PPM, "PPM", True, True, True, "pure-nox (P6 8-bit RGB)"), CodecCapability(ImageFormat.PGM, "PGM", True, True, True, "pure-nox (P5 8-bit Gray)"), CodecCapability(ImageFormat.BMP, "BMP", True, True, True, "pure-nox (24/32-bit uncompressed BI_RGB)"), CodecCapability(ImageFormat.PNG, "PNG", True, True, True, "pure-nox (8-bit Gray/RGB/RGBA/Palette+tRNS, RFC 1950/1951)"), CodecCapability(ImageFormat.JPEG, "JPEG", True, False, False, "pure-nox probe + optional-native-f8 decode/encode"), CodecCapability(ImageFormat.WEBP, "WEBP", True, False, False, "pure-nox probe + optional-native-f8 decode/encode"), CodecCapability(ImageFormat.GIF, "GIF", True, True, True, "pure-nox (GIF87a/GIF89a LZW still & animated)"), CodecCapability(ImageFormat.TIFF, "TIFF", True, False, False, "pure-nox probe + optional-native-f8 decode/encode")]
 
 def is_format_decode_supported(fmt: ImageFormat) -> bool:
     match fmt:
@@ -33,6 +33,8 @@ def is_format_decode_supported(fmt: ImageFormat) -> bool:
         case ImageFormat.BMP:
             return True
         case ImageFormat.PNG:
+            return True
+        case ImageFormat.GIF:
             return True
         case _:
             return False
@@ -46,6 +48,8 @@ def is_format_encode_supported(fmt: ImageFormat) -> bool:
         case ImageFormat.BMP:
             return True
         case ImageFormat.PNG:
+            return True
+        case ImageFormat.GIF:
             return True
         case _:
             return False

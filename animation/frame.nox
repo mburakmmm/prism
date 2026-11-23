@@ -1,0 +1,150 @@
+from core.errors import DimensionError, InvalidImageError, ResourceLimitError
+from core.image import Image
+from core.limits import ResourceLimits, checked_add, checked_mul
+from core.metadata import ImageMetadata
+from core.pixel import Pixel
+
+MIN_FRAME_DELAY_MS: int = 20
+DEFAULT_NORMALIZED_DELAY_MS: int = 100
+
+def normalize_frame_delay_ms(delay_ms: int) -> int:
+    """Validate non-negative frame delay and normalize browser-unsafe (< 20 ms) values to 100 ms."""
+    if delay_ms < 0:
+        raise DimensionError("frame duration_ms cannot be negative: " + str(delay_ms))
+    if delay_ms < MIN_FRAME_DELAY_MS:
+        return DEFAULT_NORMALIZED_DELAY_MS
+    return delay_ms
+
+enum DisposalMethod:
+    NONE
+    KEEP
+    RESTORE_BACKGROUND
+    RESTORE_PREVIOUS
+
+    def name(self) -> str:
+        match self:
+            case DisposalMethod.NONE:
+                return "NONE"
+            case DisposalMethod.KEEP:
+                return "KEEP"
+            case DisposalMethod.RESTORE_BACKGROUND:
+                return "RESTORE_BACKGROUND"
+            case DisposalMethod.RESTORE_PREVIOUS:
+                return "RESTORE_PREVIOUS"
+
+    def code(self) -> int:
+
+        match self:
+            case DisposalMethod.NONE:
+                return 0
+            case DisposalMethod.KEEP:
+                return 1
+            case DisposalMethod.RESTORE_BACKGROUND:
+                return 2
+            case DisposalMethod.RESTORE_PREVIOUS:
+                return 3
+
+def disposal_from_code(code: int) -> DisposalMethod:
+    """Convert GIF GCE disposal integer code (0..3) into DisposalMethod."""
+    if code == 1:
+        return DisposalMethod.KEEP
+    if code == 2:
+        return DisposalMethod.RESTORE_BACKGROUND
+    if code == 3:
+        return DisposalMethod.RESTORE_PREVIOUS
+    return DisposalMethod.NONE
+
+enum FrameBlend:
+    SOURCE
+    OVER
+
+    def name(self) -> str:
+        match self:
+            case FrameBlend.SOURCE:
+                return "SOURCE"
+            case FrameBlend.OVER:
+                return "OVER"
+
+class Frame:
+    """Single immutable animation frame with offset, duration, disposal, and blend metadata."""
+
+    img: Image
+    duration_ms: int
+    offset_x: int
+    offset_y: int
+    disposal: DisposalMethod
+    blend: FrameBlend
+
+    def __init__(self, img: Image, duration_ms: int, offset_x: int, offset_y: int, disposal: DisposalMethod, blend: FrameBlend) -> None:
+        if duration_ms < 0:
+            raise DimensionError("Frame duration_ms must be non-negative")
+        if offset_x < 0 or offset_y < 0:
+            raise DimensionError("Frame offset_x and offset_y must be non-negative")
+        self.img = img
+        self.duration_ms = duration_ms
+        self.offset_x = offset_x
+        self.offset_y = offset_y
+        self.disposal = disposal
+        self.blend = blend
+
+    @staticmethod
+    def simple(img: Image, duration_ms: int) -> Frame:
+
+        return Frame(img, duration_ms, 0, 0, DisposalMethod.RESTORE_BACKGROUND, FrameBlend.OVER)
+
+class Animation:
+    """Bounded multi-frame animation sequence validated against ResourceLimits."""
+
+    canvas_width: int
+    canvas_height: int
+    frames: list[Frame]
+    loop_count: int
+    background: Pixel
+    metadata: ImageMetadata
+    limits: ResourceLimits
+
+    def __init__(self, canvas_width: int, canvas_height: int, frames: list[Frame], loop_count: int, background: Pixel, metadata: ImageMetadata, lim: ResourceLimits) -> None:
+        if canvas_width <= 0 or canvas_height <= 0:
+            raise DimensionError("Animation canvas_width and canvas_height must be positive")
+        if loop_count < 0:
+            raise DimensionError("Animation loop_count must be non-negative")
+        num_frames: int = len(frames)
+        if num_frames == 0:
+            raise InvalidImageError("Animation must contain at least one Frame")
+        if num_frames > lim.max_frames:
+            raise ResourceLimitError("Animation frame count " + str(num_frames) + " exceeds max_frames " + str(lim.max_frames))
+
+        frame_rgba_bytes: int = lim.validate_dimensions(canvas_width, canvas_height, 4)
+        total_work_bytes: int = checked_mul(num_frames, frame_rgba_bytes)
+        if total_work_bytes > lim.max_decoded_bytes:
+            raise ResourceLimitError("Animation total decoded bytes " + str(total_work_bytes) + " exceeds max_decoded_bytes " + str(lim.max_decoded_bytes))
+
+        i: int = 0
+        while i < num_frames:
+            frm: Frame = frames[i]
+            right_edge: int = checked_add(frm.offset_x, frm.img.width())
+            bottom_edge: int = checked_add(frm.offset_y, frm.img.height())
+            if right_edge > canvas_width or bottom_edge > canvas_height:
+                raise DimensionError("Animation frame " + str(i) + " exceeds canvas bounds " + str(canvas_width) + "x" + str(canvas_height))
+            i = i + 1
+
+        self.canvas_width = canvas_width
+        self.canvas_height = canvas_height
+        self.frames = frames
+        self.loop_count = loop_count
+        self.background = background
+        self.metadata = metadata
+        self.limits = lim
+
+    def frame_count(self) -> int:
+
+        return len(self.frames)
+
+    def total_duration_ms(self) -> int:
+
+        total: int = 0
+        i: int = 0
+        while i < len(self.frames):
+            total = checked_add(total, self.frames[i].duration_ms)
+            i = i + 1
+        return total

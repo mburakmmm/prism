@@ -1,5 +1,6 @@
 from nox.buffer import Buffer
 from codecs.bmp import encode_bmp
+from codecs.gif import encode_gif
 from codecs.jpeg_adapter import JpegSubsampling, encode_jpeg
 from codecs.pgm import encode_pgm
 from codecs.png import encode_png
@@ -25,7 +26,7 @@ def encode_to_format(img: Image, fmt: ImageFormat, opt: EncodeOptions) -> Buffer
         case ImageFormat.PNG:
             return encode_png(img, opt)
         case ImageFormat.GIF:
-            raise UnsupportedFormatError("GIF encoder lands in Phase F9")
+            return encode_gif(img, opt)
         case ImageFormat.JPEG:
             return encode_jpeg(img, opt, JpegSubsampling.S420)
         case ImageFormat.WEBP:
@@ -36,6 +37,6 @@ def encode_to_format(img: Image, fmt: ImageFormat, opt: EncodeOptions) -> Buffer
             raise UnsupportedFormatError("cannot encode to UNKNOWN image format")
 
 def encode_bytes(img: Image, format_name: str, opt: EncodeOptions) -> Buffer:
-    """Encode an Image into a Buffer for the requested format name ('PPM', 'PGM', 'BMP', 'PNG')."""
+    """Encode an Image into a Buffer for the requested format name ('PPM', 'PGM', 'BMP', 'PNG', 'GIF')."""
     fmt: ImageFormat = format_from_name(format_name)
     return encode_to_format(img, fmt, opt)

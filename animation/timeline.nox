@@ -1,0 +1,84 @@
+from animation.frame import Animation, DisposalMethod, Frame, FrameBlend
+from composite.alpha import PorterDuffMode, composite_pixel_porter_duff
+from core.image import Image, MutableImage
+from core.pixel import Pixel, PixelFormat
+
+__all__: list[str] = ["Timeline", "render_animation_frames"]
+
+class Timeline:
+    """Animation frame composition engine honoring offset, blend, and GIF disposal rules."""
+
+    anim: Animation
+
+    def __init__(self, anim: Animation) -> None:
+        self.anim = anim
+
+    def render_frames(self) -> list[Image]:
+
+        """Compose delta/disposal frames into full RGBA8 canvas-sized Images."""
+        w: int = self.anim.canvas_width
+        h: int = self.anim.canvas_height
+        bg: Pixel = self.anim.background
+        canvas_mut: MutableImage = MutableImage.create(w, h, PixelFormat.RGBA8, bg, self.anim.limits)
+        rendered: list[Image] = []
+
+        i: int = 0
+        n: int = len(self.anim.frames)
+        while i < n:
+            frm: Frame = self.anim.frames[i]
+            prev_snapshot: Image = self.anim.frames[0].img
+            has_prev: bool = False
+            if frm.disposal == DisposalMethod.RESTORE_PREVIOUS:
+                prev_snapshot = canvas_mut.to_image()
+                has_prev = True
+
+            fw: int = frm.img.width()
+            fh: int = frm.img.height()
+            ox: int = frm.offset_x
+            oy: int = frm.offset_y
+
+            fy: int = 0
+            while fy < fh:
+                cy: int = oy + fy
+                fx: int = 0
+                while fx < fw:
+                    cx: int = ox + fx
+                    src_px: Pixel = frm.img.get_pixel(fx, fy)
+                    if frm.blend == FrameBlend.SOURCE:
+                        canvas_mut.set_pixel(cx, cy, src_px)
+                    else:
+                        if src_px.a == 255:
+                            canvas_mut.set_pixel(cx, cy, src_px)
+                        elif src_px.a > 0:
+                            dst_px: Pixel = canvas_mut.get_pixel(cx, cy)
+                            canvas_mut.set_pixel(cx, cy, composite_pixel_porter_duff(dst_px, src_px, PorterDuffMode.SOURCE_OVER))
+                    fx = fx + 1
+                fy = fy + 1
+
+            snap: Image = canvas_mut.to_image()
+            snap.color_space = frm.img.color_space
+            snap.metadata = self.anim.metadata.clone()
+            rendered.append(snap)
+
+            # Apply post-frame disposal before composing frame i + 1
+            if frm.disposal == DisposalMethod.RESTORE_BACKGROUND:
+                canvas_mut.fill_rect(ox, oy, fw, fh, bg)
+            elif frm.disposal == DisposalMethod.RESTORE_PREVIOUS and has_prev:
+                ry: int = 0
+                while ry < fh:
+                    py: int = oy + ry
+                    rx: int = 0
+                    while rx < fw:
+                        px_x: int = ox + rx
+                        canvas_mut.set_pixel(px_x, py, prev_snapshot.get_pixel(px_x, py))
+                        rx = rx + 1
+                    ry = ry + 1
+
+            i = i + 1
+
+        return rendered
+
+def render_animation_frames(anim: Animation) -> list[Image]:
+    """Convenience helper that renders all frames of `anim` into full canvas-sized Images."""
+    tl: Timeline = Timeline(anim)
+    return tl.render_frames()

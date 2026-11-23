@@ -1,0 +1,783 @@
+from nox.binary import BinaryWriter
+from nox.buffer import Buffer
+from animation.frame import Animation, DisposalMethod, Frame, FrameBlend, disposal_from_code, normalize_frame_delay_ms
+from animation.timeline import render_animation_frames
+from core.errors import CorruptDataError, DimensionError, InvalidImageError, ResourceLimitError
+from core.image import Image, MutableImage
+from core.limits import checked_add, checked_mul
+from core.metadata import ImageInfo, ImageMetadata
+from core.options import DecodeOptions, EncodeOptions
+from core.pixel import AlphaMode, ColorSpace, Pixel, PixelFormat
+
+__all__: list[str] = ["gif_lzw_decompress", "gif_lzw_compress", "probe_gif", "decode_gif_animation", "decode_gif", "encode_gif_animation", "encode_gif"]
+
+def _u16_le(data: Buffer, off: int) -> int:
+    return int(data.get(off)) | int(data.get(off + 1)) << 8
+
+def gif_lzw_decompress(compressed: list[int], min_code_size: int, expected_pixels: int) -> list[int]:
+    """Decompress a GIF LSB-first variable-width LZW stream with bounds and table-overflow guards."""
+    if min_code_size < 2 or min_code_size > 8:
+        raise CorruptDataError("invalid GIF LZW minimum code size: " + str(min_code_size))
+    if expected_pixels < 0:
+        raise DimensionError("expected_pixels must be non-negative")
+
+    clear_code: int = 1 << min_code_size
+    eoi_code: int = clear_code + 1
+    code_size: int = min_code_size + 1
+    next_code: int = eoi_code + 1
+
+    prefix: list[int] = []
+    suffix: list[int] = []
+    stack: list[int] = []
+    i: int = 0
+    while i < 4096:
+        prefix.append(-1)
+        if i < clear_code:
+            suffix.append(i)
+        else:
+            suffix.append(0)
+        stack.append(0)
+        i = i + 1
+
+    out: list[int] = []
+    byte_pos: int = 0
+    total_bytes: int = len(compressed)
+    bit_buf: int = 0
+    bits_avail: int = 0
+    prev_code: int = -1
+    first_char: int = 0
+
+    while True:
+        while bits_avail < code_size:
+            if byte_pos >= total_bytes:
+                break
+            bit_buf = bit_buf | compressed[byte_pos] << bits_avail
+            bits_avail = bits_avail + 8
+            byte_pos = byte_pos + 1
+
+        if bits_avail < code_size:
+            if len(out) == expected_pixels:
+                break
+            raise CorruptDataError("truncated GIF LZW bitstream")
+
+        code_mask: int = (1 << code_size) - 1
+        code: int = bit_buf & code_mask
+        bit_buf = bit_buf >> code_size
+        bits_avail = bits_avail - code_size
+
+        if code == clear_code:
+            code_size = min_code_size + 1
+            next_code = eoi_code + 1
+            prev_code = -1
+            continue
+
+        if code == eoi_code:
+            break
+
+        if prev_code == -1:
+            if code >= clear_code:
+                raise CorruptDataError("first GIF LZW code after ClearCode is out of palette range")
+            if len(out) + 1 > expected_pixels:
+                raise CorruptDataError("GIF LZW output exceeds expected pixel count")
+            out.append(code)
+            prev_code = code
+            first_char = code
+            continue
+
+        in_code: int = code
+        sp: int = 0
+        cur: int = code
+        if code == next_code:
+            stack[sp] = first_char
+            sp = sp + 1
+            cur = prev_code
+        elif code > next_code:
+            raise CorruptDataError("GIF LZW code exceeds active dictionary size")
+
+        while cur >= clear_code:
+            if cur >= 4096 or sp >= 4095:
+                raise CorruptDataError("GIF LZW dictionary stack overflow")
+            stack[sp] = suffix[cur]
+            sp = sp + 1
+            cur = prefix[cur]
+            if cur < 0:
+                raise CorruptDataError("corrupt GIF LZW prefix link")
+
+        first_char = cur
+        stack[sp] = cur
+        sp = sp + 1
+
+        if len(out) + sp > expected_pixels:
+            raise CorruptDataError("GIF LZW decoded stream overflows frame pixel buffer")
+
+        k: int = sp - 1
+        while k >= 0:
+            out.append(stack[k])
+            k = k - 1
+
+        if next_code < 4096:
+            prefix[next_code] = prev_code
+            suffix[next_code] = first_char
+            next_code = next_code + 1
+            if next_code == 1 << code_size and code_size < 12:
+                code_size = code_size + 1
+
+        prev_code = in_code
+
+    if len(out) != expected_pixels:
+        raise CorruptDataError("GIF LZW decoded " + str(len(out)) + " pixels, expected " + str(expected_pixels))
+    return out
+
+def gif_lzw_compress(indices: list[int], min_code_size: int) -> list[int]:
+    """Compress palette indices using GIF LSB-first variable-width LZW with automatic ClearCode resets."""
+    if min_code_size < 2 or min_code_size > 8:
+        raise InvalidImageError("GIF LZW min_code_size must be in range [2, 8]")
+
+    clear_code: int = 1 << min_code_size
+    eoi_code: int = clear_code + 1
+    code_size: int = min_code_size + 1
+    next_code: int = eoi_code + 1
+
+    ht_size: int = 16384
+    ht_mask: int = ht_size - 1
+    ht_gen: list[int] = []
+    ht_key: list[int] = []
+    ht_val: list[int] = []
+    i: int = 0
+    while i < ht_size:
+        ht_gen.append(0)
+        ht_key.append(0)
+        ht_val.append(0)
+        i = i + 1
+    gen: int = 1
+
+    out: list[int] = []
+    bit_buf: int = 0
+    bit_cnt: int = 0
+
+    # Emit initial ClearCode
+    bit_buf = bit_buf | clear_code << bit_cnt
+    bit_cnt = bit_cnt + code_size
+    while bit_cnt >= 8:
+        out.append(bit_buf & 255)
+        bit_buf = bit_buf >> 8
+        bit_cnt = bit_cnt - 8
+
+    if len(indices) == 0:
+        bit_buf = bit_buf | eoi_code << bit_cnt
+        bit_cnt = bit_cnt + code_size
+        while bit_cnt >= 8:
+            out.append(bit_buf & 255)
+            bit_buf = bit_buf >> 8
+            bit_cnt = bit_cnt - 8
+        if bit_cnt > 0:
+            out.append(bit_buf & 255)
+        return out
+
+    cur: int = indices[0] & 255
+    idx: int = 1
+    n: int = len(indices)
+    while idx < n:
+        sym: int = indices[idx] & 255
+        key: int = cur << 8 | sym
+        slot: int = (cur << 5 ^ sym) & ht_mask
+        found: bool = False
+        while ht_gen[slot] == gen:
+            if ht_key[slot] == key:
+                cur = ht_val[slot]
+                found = True
+                break
+            slot = slot + 1 & ht_mask
+
+        if not found:
+            bit_buf = bit_buf | cur << bit_cnt
+            bit_cnt = bit_cnt + code_size
+            while bit_cnt >= 8:
+                out.append(bit_buf & 255)
+                bit_buf = bit_buf >> 8
+                bit_cnt = bit_cnt - 8
+
+            if next_code < 4096:
+                ht_gen[slot] = gen
+                ht_key[slot] = key
+                ht_val[slot] = next_code
+                next_code = next_code + 1
+                if next_code > 1 << code_size and code_size < 12:
+                    code_size = code_size + 1
+            else:
+                bit_buf = bit_buf | clear_code << bit_cnt
+                bit_cnt = bit_cnt + code_size
+                while bit_cnt >= 8:
+                    out.append(bit_buf & 255)
+                    bit_buf = bit_buf >> 8
+                    bit_cnt = bit_cnt - 8
+                gen = gen + 1
+                code_size = min_code_size + 1
+                next_code = eoi_code + 1
+
+            cur = sym
+        idx = idx + 1
+
+    # Emit final code and EOI
+    bit_buf = bit_buf | cur << bit_cnt
+    bit_cnt = bit_cnt + code_size
+    while bit_cnt >= 8:
+        out.append(bit_buf & 255)
+        bit_buf = bit_buf >> 8
+        bit_cnt = bit_cnt - 8
+
+    bit_buf = bit_buf | eoi_code << bit_cnt
+    bit_cnt = bit_cnt + code_size
+    while bit_cnt >= 8:
+        out.append(bit_buf & 255)
+        bit_buf = bit_buf >> 8
+        bit_cnt = bit_cnt - 8
+    if bit_cnt > 0:
+        out.append(bit_buf & 255)
+
+    return out
+
+def _validate_gif_header(data: Buffer) -> None:
+    if data.len() < 14:
+        raise CorruptDataError("GIF data is too short (< 14 bytes)")
+    if int(data.get(0)) != 71 or int(data.get(1)) != 73 or int(data.get(2)) != 70 or int(data.get(3)) != 56:
+        raise CorruptDataError("invalid GIF signature")
+    v4: int = int(data.get(4))
+    v5: int = int(data.get(5))
+    if not ((v4 == 55 or v4 == 57) and v5 == 97):
+        raise CorruptDataError("invalid GIF version (expected GIF87a or GIF89a)")
+
+def _skip_sub_blocks(data: Buffer, start_pos: int, max_chunk_bytes: int) -> int:
+    pos: int = start_pos
+    total: int = data.len()
+    seen_bytes: int = 0
+    while pos < total:
+        sub_len: int = int(data.get(pos))
+        pos = pos + 1
+        if sub_len == 0:
+            return pos
+        seen_bytes = checked_add(seen_bytes, sub_len)
+        if seen_bytes > max_chunk_bytes:
+            raise ResourceLimitError("GIF sub-block stream exceeds max_chunk_bytes")
+        if pos + sub_len > total:
+            raise CorruptDataError("truncated GIF data sub-block")
+        pos = pos + sub_len
+    raise CorruptDataError("unterminated GIF data sub-block sequence")
+
+def probe_gif(data: Buffer, opt: DecodeOptions) -> ImageInfo:
+    """Validate GIF87a/GIF89a header, dimensions, and frame count without decoding LZW pixels."""
+    opt.limits.validate_input_size(data.len())
+    _validate_gif_header(data)
+    total: int = data.len()
+
+    canvas_w: int = _u16_le(data, 6)
+    canvas_h: int = _u16_le(data, 8)
+    packed: int = int(data.get(10))
+    opt.limits.validate_dimensions(canvas_w, canvas_h, 4)
+
+    pos: int = 13
+    if packed & 128 != 0:
+        gct_entries: int = 1 << (packed & 7) + 1
+        gct_bytes: int = gct_entries * 3
+        if pos + gct_bytes > total:
+            raise CorruptDataError("truncated GIF Global Color Table")
+        pos = pos + gct_bytes
+
+    frame_count: int = 0
+    while pos < total:
+        sep: int = int(data.get(pos))
+        pos = pos + 1
+        if sep == 59:
+            break
+        elif sep == 33:
+            if pos >= total:
+                raise CorruptDataError("truncated GIF extension introducer")
+            pos = pos + 1
+            pos = _skip_sub_blocks(data, pos, opt.limits.max_chunk_bytes)
+        elif sep == 44:
+            if pos + 10 > total:
+                raise CorruptDataError("truncated GIF Image Descriptor")
+            fx: int = _u16_le(data, pos)
+            fy: int = _u16_le(data, pos + 2)
+            fw: int = _u16_le(data, pos + 4)
+            fh: int = _u16_le(data, pos + 6)
+            ipacked: int = int(data.get(pos + 8))
+            pos = pos + 9
+            if fw <= 0 or fh <= 0:
+                raise DimensionError("GIF frame dimensions must be positive")
+            if checked_add(fx, fw) > canvas_w or checked_add(fy, fh) > canvas_h:
+                raise DimensionError("GIF frame bounds exceed logical screen dimensions")
+
+            frame_count = frame_count + 1
+            if frame_count > opt.limits.max_frames:
+                raise ResourceLimitError("GIF frame count exceeds max_frames " + str(opt.limits.max_frames))
+
+            if ipacked & 128 != 0:
+                lct_bytes: int = (1 << (ipacked & 7) + 1) * 3
+                if pos + lct_bytes > total:
+                    raise CorruptDataError("truncated GIF Local Color Table")
+                pos = pos + lct_bytes
+
+            if pos >= total:
+                raise CorruptDataError("truncated GIF LZW minimum code size")
+            pos = pos + 1
+            pos = _skip_sub_blocks(data, pos, opt.limits.max_chunk_bytes)
+        else:
+            raise CorruptDataError("unexpected GIF block separator byte: " + str(sep))
+
+    if frame_count == 0:
+        raise CorruptDataError("GIF stream contains zero image frames")
+
+    return ImageInfo(canvas_w, canvas_h, PixelFormat.RGBA8, ColorSpace.SRGB, AlphaMode.STRAIGHT, frame_count, "GIF", ImageMetadata.default())
+
+def _deinterlace_rows(flat: list[int], w: int, h: int) -> list[int]:
+    out: list[int] = []
+    i: int = 0
+    total: int = w * h
+    while i < total:
+        out.append(0)
+        i = i + 1
+
+    src_row: int = 0
+    passes_start: list[int] = [0, 4, 2, 1]
+    passes_step: list[int] = [8, 8, 4, 2]
+    p: int = 0
+    while p < 4:
+        y: int = passes_start[p]
+        step: int = passes_step[p]
+        while y < h:
+            src_off: int = src_row * w
+            dst_off: int = y * w
+            x: int = 0
+            while x < w:
+                out[dst_off + x] = flat[src_off + x]
+                x = x + 1
+            src_row = src_row + 1
+            y = y + step
+        p = p + 1
+    return out
+
+def decode_gif_animation(data: Buffer, opt: DecodeOptions) -> Animation:
+    """Decode a GIF87a/GIF89a bitstream into a bounded multi-frame Animation."""
+    opt.limits.validate_input_size(data.len())
+    _validate_gif_header(data)
+    total: int = data.len()
+
+    canvas_w: int = _u16_le(data, 6)
+    canvas_h: int = _u16_le(data, 8)
+    packed: int = int(data.get(10))
+    bg_idx: int = int(data.get(11))
+    canvas_rgba_bytes: int = opt.limits.validate_dimensions(canvas_w, canvas_h, 4)
+
+    pos: int = 13
+    gct: list[Pixel] = []
+    has_gct: bool = packed & 128 != 0
+    if has_gct:
+        gct_count: int = 1 << (packed & 7) + 1
+        gct_bytes: int = gct_count * 3
+        if pos + gct_bytes > total:
+            raise CorruptDataError("truncated GIF Global Color Table")
+        ci: int = 0
+        while ci < gct_count:
+            off: int = pos + ci * 3
+            gct.append(Pixel.rgb(int(data.get(off)), int(data.get(off + 1)), int(data.get(off + 2))))
+            ci = ci + 1
+        pos = pos + gct_bytes
+
+    bg_pixel: Pixel = Pixel.transparent()
+    if has_gct and bg_idx < len(gct):
+        bg_pixel = gct[bg_idx]
+
+    frames: list[Frame] = []
+    loop_count: int = 1
+    bg_is_trans: bool = False
+    gce_disposal: int = 0
+    gce_has_trans: bool = False
+    gce_trans_idx: int = 0
+    gce_delay_ms: int = 100
+
+    while pos < total:
+        sep: int = int(data.get(pos))
+        pos = pos + 1
+        if sep == 59:
+            break
+        elif sep == 33:
+            if pos >= total:
+                raise CorruptDataError("truncated GIF extension label")
+            label: int = int(data.get(pos))
+            pos = pos + 1
+            if label == 249:
+                # Graphic Control Extension (0xF9)
+                if pos >= total:
+                    raise CorruptDataError("truncated GIF GCE length")
+                blk_sz: int = int(data.get(pos))
+                pos = pos + 1
+                if blk_sz != 4 or pos + 5 > total:
+                    raise CorruptDataError("invalid or truncated GIF GCE block")
+                g_packed: int = int(data.get(pos))
+                gce_disposal = g_packed >> 2 & 7
+                gce_has_trans = g_packed & 1 == 1
+                delay_cs: int = _u16_le(data, pos + 1)
+                gce_delay_ms = normalize_frame_delay_ms(delay_cs * 10)
+                gce_trans_idx = int(data.get(pos + 3))
+                pos = pos + 4
+                if int(data.get(pos)) != 0:
+                    pos = _skip_sub_blocks(data, pos, opt.limits.max_chunk_bytes)
+                else:
+                    pos = pos + 1
+            elif label == 255:
+                # Application Extension (check for NETSCAPE2.0 / ANIMEXTS1.0 loop count)
+                if pos >= total:
+                    raise CorruptDataError("truncated GIF Application Extension")
+                app_len: int = int(data.get(pos))
+                pos = pos + 1
+                if pos + app_len > total:
+                    raise CorruptDataError("truncated GIF Application Extension identifier")
+                is_netscape: bool = False
+                if app_len == 11:
+                    # "NETSCAPE2.0" (78,69,84,83,67,65,80,69,50,46,48)
+                    if int(data.get(pos)) == 78 and int(data.get(pos + 1)) == 69 and int(data.get(pos + 2)) == 84 and int(data.get(pos + 8)) == 50 and int(data.get(pos + 10)) == 48:
+                        is_netscape = True
+                    # "ANIMEXTS1.0"
+                    if int(data.get(pos)) == 65 and int(data.get(pos + 1)) == 78 and int(data.get(pos + 2)) == 73:
+                        is_netscape = True
+                pos = pos + app_len
+                if is_netscape and pos < total:
+                    sub0: int = int(data.get(pos))
+                    if sub0 >= 3 and pos + 1 + sub0 <= total and int(data.get(pos + 1)) == 1:
+                        loop_count = _u16_le(data, pos + 2)
+                pos = _skip_sub_blocks(data, pos, opt.limits.max_chunk_bytes)
+            else:
+                pos = _skip_sub_blocks(data, pos, opt.limits.max_chunk_bytes)
+        elif sep == 44:
+            if pos + 10 > total:
+                raise CorruptDataError("truncated GIF Image Descriptor")
+            fx: int = _u16_le(data, pos)
+            fy: int = _u16_le(data, pos + 2)
+            fw: int = _u16_le(data, pos + 4)
+            fh: int = _u16_le(data, pos + 6)
+            ipacked: int = int(data.get(pos + 8))
+            pos = pos + 9
+
+            if fw <= 0 or fh <= 0:
+                raise DimensionError("GIF frame dimensions must be positive")
+            if checked_add(fx, fw) > canvas_w or checked_add(fy, fh) > canvas_h:
+                raise DimensionError("GIF frame bounds exceed canvas dimensions")
+
+            if len(frames) + 1 > opt.limits.max_frames:
+                raise ResourceLimitError("GIF frame count exceeds max_frames " + str(opt.limits.max_frames))
+            total_work: int = checked_mul(len(frames) + 1, canvas_rgba_bytes)
+            if total_work > opt.limits.max_decoded_bytes:
+                raise ResourceLimitError("GIF animation total decoded bytes exceeds max_decoded_bytes")
+
+            palette: list[Pixel] = gct
+            if ipacked & 128 != 0:
+                lct_count: int = 1 << (ipacked & 7) + 1
+                lct_bytes: int = lct_count * 3
+                if pos + lct_bytes > total:
+                    raise CorruptDataError("truncated GIF Local Color Table")
+                palette = []
+                li: int = 0
+                while li < lct_count:
+                    loff: int = pos + li * 3
+                    palette.append(Pixel.rgb(int(data.get(loff)), int(data.get(loff + 1)), int(data.get(loff + 2))))
+                    li = li + 1
+                pos = pos + lct_bytes
+
+            if len(palette) == 0:
+                raise CorruptDataError("GIF frame has neither Global nor Local Color Table")
+
+            if pos >= total:
+                raise CorruptDataError("truncated GIF LZW minimum code size")
+            min_code_sz: int = int(data.get(pos))
+            pos = pos + 1
+
+            lzw_bytes: list[int] = []
+            while pos < total:
+                sb_len: int = int(data.get(pos))
+                pos = pos + 1
+                if sb_len == 0:
+                    break
+                if len(lzw_bytes) + sb_len > opt.limits.max_chunk_bytes:
+                    raise ResourceLimitError("GIF frame LZW stream exceeds max_chunk_bytes")
+                if pos + sb_len > total:
+                    raise CorruptDataError("truncated GIF LZW sub-block")
+                si: int = 0
+                while si < sb_len:
+                    lzw_bytes.append(int(data.get(pos + si)))
+                    si = si + 1
+                pos = pos + sb_len
+
+            expected_px: int = checked_mul(fw, fh)
+            indices: list[int] = gif_lzw_decompress(lzw_bytes, min_code_sz, expected_px)
+            if ipacked & 64 != 0:
+                indices = _deinterlace_rows(indices, fw, fh)
+
+            frm_mut: MutableImage = MutableImage.create(fw, fh, PixelFormat.RGBA8, Pixel.transparent(), opt.limits)
+            p_len: int = len(palette)
+            py: int = 0
+            while py < fh:
+                row_off: int = py * fw
+                px_x: int = 0
+                while px_x < fw:
+                    cidx: int = indices[row_off + px_x]
+                    if cidx >= p_len:
+                        raise CorruptDataError("GIF palette index " + str(cidx) + " out of range " + str(p_len))
+                    if gce_has_trans and cidx == gce_trans_idx:
+                        frm_mut.set_pixel(px_x, py, Pixel.transparent())
+                    else:
+                        frm_mut.set_pixel(px_x, py, palette[cidx])
+                    px_x = px_x + 1
+                py = py + 1
+
+            frm_blend: FrameBlend = FrameBlend.SOURCE
+            if gce_has_trans:
+                frm_blend = FrameBlend.OVER
+                if gce_trans_idx == bg_idx:
+                    bg_is_trans = True
+            frames.append(Frame(frm_mut.to_image(), gce_delay_ms, fx, fy, disposal_from_code(gce_disposal), frm_blend))
+
+            # Reset per-frame GCE state
+            gce_disposal = 0
+            gce_has_trans = False
+            gce_trans_idx = 0
+            gce_delay_ms = 100
+        else:
+            raise CorruptDataError("unexpected GIF block separator byte: " + str(sep))
+
+    if len(frames) == 0:
+        raise CorruptDataError("GIF stream contains zero decodable frames")
+    if bg_is_trans or not has_gct:
+        bg_pixel = Pixel.transparent()
+
+    return Animation(canvas_w, canvas_h, frames, loop_count, bg_pixel, ImageMetadata.default(), opt.limits)
+
+def decode_gif(data: Buffer, opt: DecodeOptions) -> Image:
+    """Decode a GIF87a/GIF89a stream and return the first composited canvas frame."""
+    anim: Animation = decode_gif_animation(data, opt)
+    rendered: list[Image] = render_animation_frames(anim)
+    return rendered[0]
+
+def _find_exact_color(palette: list[Pixel], px: Pixel) -> int:
+    i: int = 0
+    while i < len(palette):
+        c: Pixel = palette[i]
+        if c.r == px.r and c.g == px.g and c.b == px.b:
+            return i
+        i = i + 1
+    return -1
+
+def _nearest_palette_idx(palette: list[Pixel], limit_count: int, px: Pixel) -> int:
+    best_idx: int = 0
+    best_dist: int = 999999999
+    i: int = 0
+    while i < limit_count:
+        c: Pixel = palette[i]
+        dr: int = px.r - c.r
+        dg: int = px.g - c.g
+        db: int = px.b - c.b
+        dist: int = dr * dr + dg * dg + db * db
+        if dist == 0:
+            return i
+        if dist < best_dist:
+            best_dist = dist
+            best_idx = i
+        i = i + 1
+    return best_idx
+
+def _build_animation_palette(anim: Animation) -> list[Pixel]:
+    # Index 255 is reserved as transparent slot; up to 255 exact RGB colors before 6x6x6 cube fallback
+    exact: list[Pixel] = []
+    if anim.background.a >= 128:
+        exact.append(Pixel.rgb(anim.background.r, anim.background.g, anim.background.b))
+    overflow: bool = False
+    fi: int = 0
+    while fi < len(anim.frames) and not overflow:
+        img: Image = anim.frames[fi].img
+        y: int = 0
+        while y < img.height() and not overflow:
+            x: int = 0
+            while x < img.width() and not overflow:
+                px: Pixel = img.get_pixel(x, y)
+                if px.a >= 128:
+                    if _find_exact_color(exact, px) < 0:
+                        if len(exact) >= 255:
+                            overflow = True
+                        else:
+                            exact.append(Pixel.rgb(px.r, px.g, px.b))
+                x = x + 1
+            y = y + 1
+        fi = fi + 1
+
+    palette: list[Pixel] = []
+    if not overflow:
+        k: int = 0
+        while k < len(exact):
+            palette.append(exact[k])
+            k = k + 1
+        while len(palette) < 256:
+            palette.append(Pixel.black())
+        return palette
+
+    # Fallback: 6x6x6 uniform RGB cube (216 colors) + 39 grayscale steps + slot 255
+    r_i: int = 0
+    while r_i < 6:
+        g_i: int = 0
+        while g_i < 6:
+            b_i: int = 0
+            while b_i < 6:
+                palette.append(Pixel.rgb(r_i * 51, g_i * 51, b_i * 51))
+                b_i = b_i + 1
+            g_i = g_i + 1
+        r_i = r_i + 1
+    g_step: int = 0
+    while g_step < 39:
+        val: int = g_step * 255 // 38
+        palette.append(Pixel.rgb(val, val, val))
+        g_step = g_step + 1
+    palette.append(Pixel.black())
+    return palette
+
+def encode_gif_animation(anim: Animation, opt: EncodeOptions) -> Buffer:
+    """Encode an Animation into a valid GIF89a bitstream respecting ResourceLimits."""
+    opt.limits.validate_dimensions(anim.canvas_width, anim.canvas_height, 4)
+    if len(anim.frames) > opt.limits.max_frames:
+        raise ResourceLimitError("GIF frame count exceeds max_frames " + str(opt.limits.max_frames))
+
+    palette: list[Pixel] = _build_animation_palette(anim)
+    trans_index: int = 255
+
+    raw_bytes: list[int] = []
+    # 1. Header "GIF89a"
+    raw_bytes.append(71)
+    raw_bytes.append(73)
+    raw_bytes.append(70)
+    raw_bytes.append(56)
+    raw_bytes.append(57)
+    raw_bytes.append(97)
+
+    # 2. Logical Screen Descriptor (GCT flag=1, color res=7, size=7 => 256 colors => packed=0xF7)
+    bg_idx_out: int = trans_index
+    if anim.background.a >= 128:
+        bg_idx_out = _nearest_palette_idx(palette, 255, anim.background)
+    raw_bytes.append(anim.canvas_width & 255)
+    raw_bytes.append(anim.canvas_width >> 8 & 255)
+    raw_bytes.append(anim.canvas_height & 255)
+    raw_bytes.append(anim.canvas_height >> 8 & 255)
+    raw_bytes.append(247)
+    raw_bytes.append(bg_idx_out)
+    raw_bytes.append(0)
+
+    # 3. 256-entry Global Color Table (768 bytes)
+    pi: int = 0
+    while pi < 256:
+        c: Pixel = palette[pi]
+        raw_bytes.append(c.r)
+        raw_bytes.append(c.g)
+        raw_bytes.append(c.b)
+        pi = pi + 1
+
+    # 4. NETSCAPE2.0 Loop Extension if multi-frame
+    if len(anim.frames) > 1:
+        raw_bytes.append(33)
+        raw_bytes.append(255)
+        raw_bytes.append(11)
+        # "NETSCAPE2.0"
+        ns: list[int] = [78, 69, 84, 83, 67, 65, 80, 69, 50, 46, 48]
+        ni: int = 0
+        while ni < len(ns):
+            raw_bytes.append(ns[ni])
+            ni = ni + 1
+        raw_bytes.append(3)
+        raw_bytes.append(1)
+        raw_bytes.append(anim.loop_count & 255)
+        raw_bytes.append(anim.loop_count >> 8 & 255)
+        raw_bytes.append(0)
+
+    # 5. Encode each Frame (GCE + Image Descriptor + LZW sub-blocks)
+    fi: int = 0
+    while fi < len(anim.frames):
+        frm: Frame = anim.frames[fi]
+        fimg: Image = frm.img
+        fw: int = fimg.width()
+        fh: int = fimg.height()
+
+        has_trans: bool = False
+        indices: list[int] = []
+        fy: int = 0
+        while fy < fh:
+            fx: int = 0
+            while fx < fw:
+                px: Pixel = fimg.get_pixel(fx, fy)
+                if px.a < 128:
+                    has_trans = True
+                    indices.append(trans_index)
+                else:
+                    indices.append(_nearest_palette_idx(palette, 255, px))
+                fx = fx + 1
+            fy = fy + 1
+
+        # GCE (0x21 0xF9 0x04 packed delay_lo delay_hi trans_idx 0x00)
+        delay_cs: int = (frm.duration_ms + 5) // 10
+        if delay_cs > 65535:
+            delay_cs = 65535
+        g_packed: int = (frm.disposal.code() & 7) << 2
+        if has_trans:
+            g_packed = g_packed | 1
+
+        raw_bytes.append(33)
+        raw_bytes.append(249)
+        raw_bytes.append(4)
+        raw_bytes.append(g_packed)
+        raw_bytes.append(delay_cs & 255)
+        raw_bytes.append(delay_cs >> 8 & 255)
+        raw_bytes.append(trans_index)
+        raw_bytes.append(0)
+
+        # Image Descriptor (0x2C)
+        raw_bytes.append(44)
+        raw_bytes.append(frm.offset_x & 255)
+        raw_bytes.append(frm.offset_x >> 8 & 255)
+        raw_bytes.append(frm.offset_y & 255)
+        raw_bytes.append(frm.offset_y >> 8 & 255)
+        raw_bytes.append(fw & 255)
+        raw_bytes.append(fw >> 8 & 255)
+        raw_bytes.append(fh & 255)
+        raw_bytes.append(fh >> 8 & 255)
+        raw_bytes.append(0)
+
+        # LZW Minimum Code Size = 8
+        raw_bytes.append(8)
+        comp: list[int] = gif_lzw_compress(indices, 8)
+        cpos: int = 0
+        clen: int = len(comp)
+        while cpos < clen:
+            chunk_sz: int = clen - cpos
+            if chunk_sz > 255:
+                chunk_sz = 255
+            raw_bytes.append(chunk_sz)
+            si: int = 0
+            while si < chunk_sz:
+                raw_bytes.append(comp[cpos + si])
+                si = si + 1
+            cpos = cpos + chunk_sz
+        raw_bytes.append(0)
+        fi = fi + 1
+
+    # 6. Trailer ';' (0x3B)
+    raw_bytes.append(59)
+    opt.limits.validate_output_size(len(raw_bytes))
+
+    out_buf: Buffer = Buffer(len(raw_bytes))
+    bw: BinaryWriter = BinaryWriter(out_buf)
+    bi: int = 0
+    while bi < len(raw_bytes):
+        bw.write_u8(u8(raw_bytes[bi]))
+        bi = bi + 1
+    return out_buf
+
+def encode_gif(img: Image, opt: EncodeOptions) -> Buffer:
+    """Encode a single still Image as a 1-frame GIF89a Buffer."""
+    frm: Frame = Frame.simple(img, 100)
+    anim: Animation = Animation(img.width(), img.height(), [frm], 0, Pixel.transparent(), img.metadata.clone(), opt.limits)
+    return encode_gif_animation(anim, opt)

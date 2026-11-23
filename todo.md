@@ -54,8 +54,8 @@ Bu dosya, `AGENTS.md` içindeki bağlayıcı mühendislik sözleşmesini, güven
 | **v0.6.0** | **F6** | Filters, Enhancement & Pixel Kernels (Grayscale, Brightness/Contrast/Saturation/Gamma, Convolution, Gaussian, Sharpen, Sobel, Median, Morphology, Stats/SSIM/PSNR) | Web / Masaüstü | **TAMAMLANDI** |
 | **v0.7.0** | **F7** | Drawing, Text, Masks & Compositing (Porter-Duff, Blend Modes, Shapes, Antialiased Rasterizer, Iterative Flood Fill, Embedded Bitmap Font) | Programatik Üretim | **TAMAMLANDI** |
 | **v0.8.0** | **F8** | Native Codec Adapters (İzole C ABI Sınırı, Opt-in JPEG & WebP Decode/Encode, `CodecUnavailableError` Fallback, Leak/CVE Harness) | Web / Backend Sürümü | **TAMAMLANDI** |
-| **v0.8.5** | **F9** | Animation & Advanced Formats (`Frame`/`Animation` Modeli, GIF LZW/Disposal/Transparency/Loop, APNG & Animated WebP Pilotu) | Profesyonel | **SIRADAKİ FAZ** |
-| **v0.9.0** | **F10** | Pipeline DAG, Planner & Tile Engine (Immutable Operasyon Grafı, Güvenli Plan Optimizasyonu, Halo/Border Hesabı, Bounded Tile Executor, Cache) | Yüksek Performans | PLANLANDI |
+| **v0.8.5** | **F9** | Animation & Advanced Formats (`Frame`/`Animation` Modeli, GIF LZW/Disposal/Transparency/Loop, APNG & Animated WebP Pilotu) | Profesyonel | **TAMAMLANDI** |
+| **v0.9.0** | **F10** | Pipeline DAG, Planner & Tile Engine (Immutable Operasyon Grafı, Güvenli Plan Optimizasyonu, Halo/Border Hesabı, Bounded Tile Executor, Cache) | Yüksek Performans | **SIRADAKİ FAZ** |
 | **v0.9.2** | **F11** | Streaming, Large Image & Batch Processing (`ImageReader`/`ImageWriter`, Disk Spill & Quota, Atomik Commit, `spawn` Paralel Tile/Batch) | Yüksek Performans | PLANLANDI |
 | **v0.9.4** | **F12** | Advanced Color/Type & Pro Features (`GRAY16`/`RGB16`/`RGBA16`/`RGBAF32`, PNG 16-bit/Adam7, Quantization, Dithering, CLAHE, Canny, ICC Adapter) | Profesyonel | PLANLANDI |
 | **v0.9.6** | **F13** | Ecosystem Integrations & CLI (`prism` CLI, Nyx Upload/Thumbnail, Aether, Ember Batch, Aura Surface, Nova HTTP SSRF-Safe Adapter, Atlas/Pulse/Glyph) | Ekosistem & Web | PLANLANDI |
@@ -420,19 +420,19 @@ Bağımlılık sırası: `v0.0.1 (F0) -> v0.1.0 (F1) -> v0.2.0 (F2) -> v0.3.0 (F
 **Hedef:** `Frame` ve `Animation` veri modeliyle GIF (still + animated) ve çok kareli görüntülerin kaynak bütçesi altında güvenli işlenmesi.
 
 #### F9.1 — Animasyon Veri Modeli ve GIF Motoru (`animation/frame.nox`, `animation/timeline.nox`, `animation/gif.nox`, `codecs/gif.nox`)
-- [ ] `DisposalMethod` (`NONE`, `KEEP`, `RESTORE_BACKGROUND`, `RESTORE_PREVIOUS`) ve `FrameBlend` (`SOURCE`, `OVER`) enum'ları.
-- [ ] `Frame(image, duration_ms, offset_x, offset_y, disposal, blend)` ve `Animation(canvas_width, canvas_height, frames, loop_count, background, metadata)`.
-- [ ] GIF87a / GIF89a saf NOX decoder ve encoder:
-  - [ ] Global ve Local Color Table, Graphic Control Extension (delay, transparency index, disposal 0/1/2/3), Application Extension (`NETSCAPE2.0` loop count).
-  - [ ] Variable-length LZW decoder/encoder (clear code, EOI, masa taşması ve bozuk kod akışı koruması).
-  - [ ] 0ms veya çok küçük delay değerleri için güvenli minimum süre normalizasyonu politikası.
-  - [ ] `frames * canvas_width * canvas_height * 4 <= limits.max_decoded_bytes` ve `len(frames) <= limits.max_frames` toplam iş bütçesi kontrolü.
-- [ ] Tam kare kompozisyon motoru (`Timeline.render_frames()`): delta kareleri disposal kurallarına göre ana tuval üzerinde birleştirerek tam `Image` kareleri üretme.
+- [x] `DisposalMethod` (`NONE`, `KEEP`, `RESTORE_BACKGROUND`, `RESTORE_PREVIOUS`) ve `FrameBlend` (`SOURCE`, `OVER`) enum'ları.
+- [x] `Frame(img, duration_ms, offset_x, offset_y, disposal, blend)` ve `Animation(canvas_width, canvas_height, frames, loop_count, background, metadata, lim)`.
+- [x] GIF87a / GIF89a saf NOX decoder ve encoder:
+  - [x] Global ve Local Color Table, Graphic Control Extension (delay, transparency index, disposal 0/1/2/3), Application Extension (`NETSCAPE2.0` loop count).
+  - [x] Variable-length LZW decoder/encoder (`gif_lzw_decompress`, `gif_lzw_compress` — clear code, EOI, masa taşması ve bozuk kod akışı koruması).
+  - [x] 0ms veya çok küçük delay değerleri için güvenli minimum süre normalizasyonu politikası (`normalize_frame_delay_ms`).
+  - [x] `frames * canvas_width * canvas_height * 4 <= limits.max_decoded_bytes` ve `len(frames) <= limits.max_frames` toplam iş bütçesi kontrolü.
+- [x] Tam kare kompozisyon motoru (`Timeline.render_frames()`, `render_gif_frames`): delta kareleri disposal kurallarına göre ana tuval üzerinde birleştirerek tam `Image` kareleri üretme.
 
 #### Faz F9 (`v0.8.5`) Çıkış Kapısı
-- [ ] GIF disposal (`KEEP`, `RESTORE_BACKGROUND`, `RESTORE_PREVIOUS`) ve şeffaf kare golden testleri geçiyor.
-- [ ] 100+ kare bellek ve `max_frames` limit testi geçiyor.
-- [ ] Bozuk LZW akışı, taşan frame offset'i ve negatif/bozuk boyutlar `CorruptDataError` / `DimensionError` ile reddediliyor.
+- [x] GIF disposal (`KEEP`, `RESTORE_BACKGROUND`, `RESTORE_PREVIOUS`) ve şeffaf kare golden testleri geçiyor (`tests/codecs/gif_animation_test.nox`).
+- [x] 100+ kare (120 kare) bellek ve `max_frames` limit testi geçiyor.
+- [x] Bozuk LZW akışı, taşan frame offset'i ve negatif/bozuk boyutlar `CorruptDataError` / `DimensionError` ile reddediliyor.
 
 ---
 
@@ -826,4 +826,38 @@ Bağımlılık sırası: `v0.0.1 (F0) -> v0.1.0 (F1) -> v0.2.0 (F2) -> v0.3.0 (F
 
   noxc test --backend qbe
   => 11 passed, 0 failed (11 total)
+  ```
+
+### `v0.8.5` (Faz F9 — Animation Model, Timeline Compositor & Pure-NOX GIF Engine) — 2026-11-23
+
+- **Derleyici & Ortam:** `noxc 2.2.38` (`/Users/melihburakmemis/.nox-lang/bin/noxc`), macOS arm64 (Apple Silicon).
+- **Eklenen Doküman:** `docs/nox-limitations.md` (derleyici/stdlib kısıtları ve Prism çözümleri).
+- **Çalıştırılan Doğrulama Komutları ve Çıktıları:**
+  ```text
+  noxc check prism.nox
+  noxc check --strict-spawn-shared prism.nox
+  noxc check --profile freestanding animation/frame.nox animation/timeline.nox animation/gif.nox codecs/gif.nox
+  => 0 type errors
+
+  noxc test
+  => gif_animation_test-ok
+  => native_adapters_test-ok
+  => png_test-ok
+  => portable_codecs_test-ok
+  => header_fuzz_test-ok: 10000 iterations, 10000 rejected cleanly
+  => resample_golden_test-ok: 120 golden cases passed
+  => color_metadata_test-ok
+  => core_pixel_test-ok: 2x2, color, ppm/pgm, 26 negative tests, 1000 random image properties passed
+  => draw_composite_test-ok
+  => facade_test-ok
+  => filters_test-ok
+  => geometry_test-ok
+  => 12 passed, 0 failed (12 total)
+
+  noxc test --backend qbe
+  => 12 passed, 0 failed (12 total)
+
+  noxc run examples/animation_gif.nox
+  noxc run --backend qbe examples/animation_gif.nox
+  => animation-gif-ok 32 32 3 360
   ```

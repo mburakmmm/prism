@@ -88,12 +88,16 @@ jobs:
           noxc check --profile freestanding draw/shapes.nox
           noxc check --profile freestanding draw/paths.nox
           noxc check --profile freestanding draw/text.nox
+          noxc check --profile freestanding animation/frame.nox
+          noxc check --profile freestanding animation/timeline.nox
+          noxc check --profile freestanding animation/gif.nox
           noxc check --profile freestanding codecs/deflate.nox
           noxc check --profile freestanding codecs/sniff.nox
           noxc check --profile freestanding codecs/registry.nox
           noxc check --profile freestanding codecs/jpeg_adapter.nox
           noxc check --profile freestanding codecs/webp_adapter.nox
           noxc check --profile freestanding codecs/tiff_adapter.nox
+          noxc check --profile freestanding codecs/gif.nox
 
       - name: Run Full Automated Test & Fuzz Suite (LLVM Backend)
         run: noxc test
@@ -110,3 +114,4 @@ jobs:
           noxc run examples/avatar.nox
           noxc run examples/filters.nox
           noxc run examples/watermark.nox
+          noxc run examples/animation_gif.nox

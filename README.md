@@ -9,9 +9,9 @@ Prism is a zero-dependency, statically typed, resource-bounded image processing 
 [![CI Matrix](https://github.com/mburakmmm/prism/actions/workflows/ci.yml/badge.svg)](https://github.com/mburakmmm/prism/actions/workflows/ci.yml)
 [![Release Gate](https://github.com/mburakmmm/prism/actions/workflows/release.yml/badge.svg)](https://github.com/mburakmmm/prism/actions/workflows/release.yml)
 [![Security Gates](https://github.com/mburakmmm/prism/actions/workflows/security.yml/badge.svg)](https://github.com/mburakmmm/prism/actions/workflows/security.yml)
-[![Version](https://img.shields.io/badge/version-v0.8.5-orange.svg)](nox.json)
+[![Version](https://img.shields.io/badge/version-v0.9.0-orange.svg)](nox.json)
 [![Platform Support](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20Freestanding-blue.svg)](#-cross-platform--compatibility-matrix)
-[![Tests](https://img.shields.io/badge/tests-12%20suites%20%7C%2011%2C350%2B%20checks%20%28100%25%29-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-13%20suites%20%7C%2012%2C400%2B%20checks%20%28100%25%29-brightgreen.svg)](tests/)
 [![Compiler](https://img.shields.io/badge/noxc-2.2.38-purple.svg)](https://github.com/mburakmmm/nox-lang)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -91,6 +91,7 @@ Prism is a zero-dependency, statically typed, resource-bounded image processing 
 | **Drawing, Text & Compositing** | [`draw/canvas.nox`](draw/canvas.nox), [`draw/shapes.nox`](draw/shapes.nox), [`draw/text.nox`](draw/text.nox), [`composite/layers.nox`](composite/layers.nox) | `Canvas` clipping, `PorterDuffMode` (6 modes), `BlendMode` (7 W3C modes), `apply_mask`/`masked_composite`, `Layer`/`composite_layers`, anti-aliased lines, circles, rounded rects, polygons, Bezier curves, iterative `flood_fill`, and embedded 8x8 bitmap font (`measure_text`, `draw_text`). |
 | **Opt-In Native Adapters & Probers** | [`codecs/jpeg_adapter.nox`](codecs/jpeg_adapter.nox), [`codecs/webp_adapter.nox`](codecs/webp_adapter.nox), [`codecs/tiff_adapter.nox`](codecs/tiff_adapter.nox), [`native/include/prism_native_abi.h`](native/include/prism_native_abi.h) | Pure-NOX header probing (`probe_jpeg`, `probe_webp`, `probe_tiff`), `ResourceLimits` & `EncodeOptions` validation (`JpegSubsampling`, `quality`, `lossless`), C ABI boundary (`PRISM_NATIVE_ABI_VERSION=1`), and typed `CodecUnavailableError` fallback when native libraries are absent. |
 | **Animation & Pure-NOX GIF Engine** | [`animation/frame.nox`](animation/frame.nox), [`animation/timeline.nox`](animation/timeline.nox), [`codecs/gif.nox`](codecs/gif.nox), [`animation/gif.nox`](animation/gif.nox) | Bounded `Frame` & `Animation` model (`max_frames`, total pixel budget, delay normalization), `Timeline.render_frames()` compositor (`NONE`/`KEEP`/`RESTORE_BACKGROUND`/`RESTORE_PREVIOUS`), and pure-NOX GIF87a/GIF89a LZW still & animated decoder/encoder. |
+| **Pipeline DAG & Halo Tile Engine** | [`pipeline/graph.nox`](pipeline/graph.nox), [`pipeline/planner.nox`](pipeline/planner.nox), [`pipeline/tiles.nox`](pipeline/tiles.nox), [`pipeline/cache.nox`](pipeline/cache.nox), [`pipeline/executor.nox`](pipeline/executor.nox) | Immutable typed `PipelineGraph`, safe algebraic optimizer (`Crop`/`Flip`/`Rotate90`/`Invert`/`ConvertColor`), halo-padded `execute_tiled_node`, and CRC32-keyed LRU `PlanCache` (`max_bytes`) verified across 1,000 random pipelines. |
 
 ---
 
@@ -99,7 +100,7 @@ Prism is a zero-dependency, statically typed, resource-bounded image processing 
 Add Prism to your Nox project using `noxc add` or in `nox.json`:
 
 ```bash
-noxc add prism github.com/mburakmmm/prism --ref v0.8.5
+noxc add prism github.com/mburakmmm/prism --ref v0.9.0
 ```
 
 ```json
@@ -108,7 +109,7 @@ noxc add prism github.com/mburakmmm/prism --ref v0.8.5
   "version": "0.1.0",
   "entry": "main.nox",
   "requires": [
-    { "alias": "prism", "repo": "github.com/mburakmmm/prism", "ref": "v0.8.5" }
+    { "alias": "prism", "repo": "github.com/mburakmmm/prism", "ref": "v0.9.0" }
   ]
 }
 ```
@@ -276,7 +277,7 @@ Prism is continuously verified on every push, pull request, and release tag via 
 | **Ubuntu Linux** | x86_64, aarch64 | `noxc 2.2.38` (LLVM & QBE backends) | ✅ Passing |
 | **macOS** | Apple Silicon (arm64), Intel (x86_64) | `noxc 2.2.38` (LLVM & QBE backends) | ✅ Passing |
 | **Windows 10/11** | x86_64 | `noxc 2.2.38` (Windows hosted backend) | ✅ Passing |
-| **Freestanding Profile** | Target-agnostic (`--profile freestanding`) | `43` pure-Nox core, transform, filter, composite, draw, animation, DEFLATE, GIF & adapter modules | ✅ Passing |
+| **Freestanding Profile** | Target-agnostic (`--profile freestanding`) | `49` pure-Nox core, transform, filter, composite, draw, animation, pipeline, DEFLATE, GIF & adapter modules | ✅ Passing |
 
 ---
 
@@ -332,8 +333,9 @@ noxc test --backend qbe
 | **`v0.7.0`** | **F7** | Drawing, Text (Embedded Bitmap Font), Masks & Porter-Duff / Blend Mode Compositing | ✅ Released |
 | **`v0.8.0`** | **F8** | Optional Native Codec Adapters (JPEG, WebP, TIFF) with C ABI Isolation & Pure-NOX Probers | ✅ Released |
 | **`v0.8.5`** | **F9** | Animation & Multi-Frame Formats (`Frame`, `Animation`, `Timeline`, Pure-NOX GIF LZW/Disposal) | ✅ Released |
-| **`v0.9.0`** | **F10** | Pipeline DAG, Safe Algebraic Planner & Halo-Aware Tile Engine | 🔜 Next |
-| **`v0.9.2`–`v1.0.0`** | **F11–F16** | Streaming/Batch, 16-bit/Float, CLI & 1.0 | 📋 Planned |
+| **`v0.9.0`** | **F10** | Pipeline DAG, Safe Algebraic Planner & Halo-Aware Tile Executor | ✅ Released |
+| **`v0.9.2`** | **F11** | Streaming Reader/Writer, Bounded Disk Spill & Parallel Tile/Batch Execution | 🔜 Next |
+| **`v0.9.4`–`v1.0.0`** | **F12–F16** | 16-bit/Float, CLI/Ecosystem Adapters, Portability, Security/RC & 1.0 | 📋 Planned |
 
 ---
 

@@ -101,6 +101,12 @@ jobs:
           noxc check --profile freestanding codecs/webp_adapter.nox
           noxc check --profile freestanding codecs/tiff_adapter.nox
           noxc check --profile freestanding codecs/gif.nox
+          noxc check --profile freestanding pipeline/nodes.nox
+          noxc check --profile freestanding pipeline/graph.nox
+          noxc check --profile freestanding pipeline/planner.nox
+          noxc check --profile freestanding pipeline/tiles.nox
+          noxc check --profile freestanding pipeline/cache.nox
+          noxc check --profile freestanding pipeline/executor.nox
 
       - name: Run Full Test & Fuzz Suite (LLVM Backend)
         run: noxc test
@@ -118,6 +124,7 @@ jobs:
           noxc run examples/filters.nox
           noxc run examples/watermark.nox
           noxc run examples/animation_gif.nox
+          noxc run examples/pipeline_demo.nox
 
   create-release:
     name: Publish GitHub Release

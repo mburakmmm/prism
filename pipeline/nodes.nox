@@ -1,0 +1,266 @@
+import nox.mathx
+from core.errors import DimensionError, InvalidImageError
+from core.pixel import ColorSpace, Pixel
+from filters.enhance import GrayscaleMode
+from transforms.resample import ResampleFilter, require_finite_float
+
+enum PipelineNodeKind:
+    DECODE
+    CONVERT_COLOR
+    ORIENT
+    CROP
+    PAD
+    FLIP
+    ROTATE90
+    RESIZE
+    FILTER
+    COMPOSITE
+    DRAW
+    ENCODE
+
+    def name(self) -> str:
+        match self:
+            case PipelineNodeKind.DECODE:
+                return "DECODE"
+            case PipelineNodeKind.CONVERT_COLOR:
+                return "CONVERT_COLOR"
+            case PipelineNodeKind.ORIENT:
+                return "ORIENT"
+            case PipelineNodeKind.CROP:
+                return "CROP"
+            case PipelineNodeKind.PAD:
+                return "PAD"
+            case PipelineNodeKind.FLIP:
+                return "FLIP"
+            case PipelineNodeKind.ROTATE90:
+                return "ROTATE90"
+            case PipelineNodeKind.RESIZE:
+                return "RESIZE"
+            case PipelineNodeKind.FILTER:
+                return "FILTER"
+            case PipelineNodeKind.COMPOSITE:
+                return "COMPOSITE"
+            case PipelineNodeKind.DRAW:
+                return "DRAW"
+            case PipelineNodeKind.ENCODE:
+                return "ENCODE"
+
+enum PipelineFilterOp:
+    NONE
+    INVERT
+    GRAYSCALE_SRGB
+    GRAYSCALE_LINEAR
+    BRIGHTNESS
+    CONTRAST
+    BOX_BLUR
+    GAUSSIAN_BLUR
+    SHARPEN
+    SOBEL
+    MEDIAN
+
+    def name(self) -> str:
+        match self:
+            case PipelineFilterOp.NONE:
+                return "NONE"
+            case PipelineFilterOp.INVERT:
+                return "INVERT"
+            case PipelineFilterOp.GRAYSCALE_SRGB:
+                return "GRAYSCALE_SRGB"
+            case PipelineFilterOp.GRAYSCALE_LINEAR:
+                return "GRAYSCALE_LINEAR"
+            case PipelineFilterOp.BRIGHTNESS:
+                return "BRIGHTNESS"
+            case PipelineFilterOp.CONTRAST:
+                return "CONTRAST"
+            case PipelineFilterOp.BOX_BLUR:
+                return "BOX_BLUR"
+            case PipelineFilterOp.GAUSSIAN_BLUR:
+                return "GAUSSIAN_BLUR"
+            case PipelineFilterOp.SHARPEN:
+                return "SHARPEN"
+            case PipelineFilterOp.SOBEL:
+                return "SOBEL"
+            case PipelineFilterOp.MEDIAN:
+                return "MEDIAN"
+
+class PipelineNode:
+    """Typed immutable operation descriptor node in a Prism PipelineGraph."""
+
+    kind: PipelineNodeKind
+    i0: int
+    i1: int
+    i2: int
+    i3: int
+    f0: float
+    f1: float
+    color_target: ColorSpace
+    resample_filter: ResampleFilter
+    filter_op: PipelineFilterOp
+    pixel_param: Pixel
+    format_param: str
+    requires_materialization: bool
+    halo_radius: int
+
+    def __init__(self, kind: PipelineNodeKind, i0: int, i1: int, i2: int, i3: int, f0: float, f1: float, color_target: ColorSpace, resample_filter: ResampleFilter, filter_op: PipelineFilterOp, pixel_param: Pixel, format_param: str, requires_materialization: bool, halo_radius: int) -> None:
+        self.kind = kind
+        self.i0 = i0
+        self.i1 = i1
+        self.i2 = i2
+        self.i3 = i3
+        self.f0 = f0
+        self.f1 = f1
+        self.color_target = color_target
+        self.resample_filter = resample_filter
+        self.filter_op = filter_op
+        self.pixel_param = pixel_param
+        self.format_param = format_param
+        self.requires_materialization = requires_materialization
+        self.halo_radius = halo_radius
+
+    def is_tileable(self) -> bool:
+
+        if self.requires_materialization:
+            return False
+        return self.kind == PipelineNodeKind.FILTER or self.kind == PipelineNodeKind.CONVERT_COLOR
+
+    def fingerprint(self) -> str:
+
+        return self.kind.name() + ":" + self.filter_op.name() + ":" + self.color_target.name() + ":" + self.resample_filter.name() + ":" + str(self.i0) + "," + str(self.i1) + "," + str(self.i2) + "," + str(self.i3) + ":" + str(int(nox.mathx.floor(self.f0 * 1000.0 + 0.5))) + "," + str(int(nox.mathx.floor(self.f1 * 1000.0 + 0.5))) + ":" + self.pixel_param.to_str() + ":" + self.format_param
+
+    @staticmethod
+    def decode_marker(fmt_name: str) -> PipelineNode:
+
+        return PipelineNode(PipelineNodeKind.DECODE, 0, 0, 0, 0, 0.0, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.NONE, Pixel.transparent(), fmt_name, True, 0)
+
+    @staticmethod
+    def encode_marker(fmt_name: str) -> PipelineNode:
+
+        return PipelineNode(PipelineNodeKind.ENCODE, 0, 0, 0, 0, 0.0, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.NONE, Pixel.transparent(), fmt_name, True, 0)
+
+    @staticmethod
+    def convert_color(target: ColorSpace) -> PipelineNode:
+
+        return PipelineNode(PipelineNodeKind.CONVERT_COLOR, 0, 0, 0, 0, 0.0, 0.0, target, ResampleFilter.NEAREST, PipelineFilterOp.NONE, Pixel.transparent(), "", False, 0)
+
+    @staticmethod
+    def orient(exif_orient: int) -> PipelineNode:
+
+        if exif_orient < 1 or exif_orient > 8:
+            raise InvalidImageError("orient EXIF value must be in range [1, 8]")
+        return PipelineNode(PipelineNodeKind.ORIENT, exif_orient, 0, 0, 0, 0.0, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.NONE, Pixel.transparent(), "", True, 0)
+
+    @staticmethod
+    def crop(x: int, y: int, w: int, h: int) -> PipelineNode:
+
+        if x < 0 or y < 0 or w <= 0 or h <= 0:
+            raise DimensionError("PipelineNode.crop requires x>=0, y>=0, w>0, h>0")
+        return PipelineNode(PipelineNodeKind.CROP, x, y, w, h, 0.0, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.NONE, Pixel.transparent(), "", True, 0)
+
+    @staticmethod
+    def pad(left: int, top: int, right: int, bottom: int, fill: Pixel) -> PipelineNode:
+
+        if left < 0 or top < 0 or right < 0 or bottom < 0:
+            raise DimensionError("PipelineNode.pad extents must be non-negative")
+        return PipelineNode(PipelineNodeKind.PAD, left, top, right, bottom, 0.0, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.NONE, fill, "", True, 0)
+
+    @staticmethod
+    def flip_h() -> PipelineNode:
+
+        return PipelineNode(PipelineNodeKind.FLIP, 0, 0, 0, 0, 0.0, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.NONE, Pixel.transparent(), "H", True, 0)
+
+    @staticmethod
+    def flip_v() -> PipelineNode:
+
+        return PipelineNode(PipelineNodeKind.FLIP, 1, 0, 0, 0, 0.0, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.NONE, Pixel.transparent(), "V", True, 0)
+
+    @staticmethod
+    def rotate90(turns: int) -> PipelineNode:
+
+        norm: int = (turns % 4 + 4) % 4
+        return PipelineNode(PipelineNodeKind.ROTATE90, norm, 0, 0, 0, 0.0, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.NONE, Pixel.transparent(), "", True, 0)
+
+    @staticmethod
+    def resize(w: int, h: int, flt: ResampleFilter) -> PipelineNode:
+
+        if w <= 0 or h <= 0:
+            raise DimensionError("PipelineNode.resize dimensions must be positive")
+        return PipelineNode(PipelineNodeKind.RESIZE, w, h, 0, 0, 0.0, 0.0, ColorSpace.SRGB, flt, PipelineFilterOp.NONE, Pixel.transparent(), "", True, 0)
+
+    @staticmethod
+    def invert() -> PipelineNode:
+
+        return PipelineNode(PipelineNodeKind.FILTER, 0, 0, 0, 0, 0.0, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.INVERT, Pixel.transparent(), "", False, 0)
+
+    @staticmethod
+    def grayscale(mode: GrayscaleMode) -> PipelineNode:
+
+        op: PipelineFilterOp = PipelineFilterOp.GRAYSCALE_SRGB
+        if mode == GrayscaleMode.LINEAR_LUMINANCE:
+            op = PipelineFilterOp.GRAYSCALE_LINEAR
+        return PipelineNode(PipelineNodeKind.FILTER, 0, 0, 0, 0, 0.0, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, op, Pixel.transparent(), "", False, 0)
+
+    @staticmethod
+    def brightness(delta: int) -> PipelineNode:
+
+        if delta < -255 or delta > 255:
+            raise InvalidImageError("PipelineNode.brightness delta must be in [-255, 255]")
+        return PipelineNode(PipelineNodeKind.FILTER, delta, 0, 0, 0, 0.0, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.BRIGHTNESS, Pixel.transparent(), "", False, 0)
+
+    @staticmethod
+    def contrast(factor: float) -> PipelineNode:
+
+        require_finite_float(factor, "factor")
+        if factor < 0.0:
+            raise InvalidImageError("PipelineNode.contrast factor must be non-negative")
+        return PipelineNode(PipelineNodeKind.FILTER, 0, 0, 0, 0, factor, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.CONTRAST, Pixel.transparent(), "", False, 0)
+
+    @staticmethod
+    def box_blur(radius: int) -> PipelineNode:
+
+        if radius < 1 or radius > 32:
+            raise DimensionError("PipelineNode.box_blur radius must be in [1, 32]")
+        return PipelineNode(PipelineNodeKind.FILTER, radius, 0, 0, 0, 0.0, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.BOX_BLUR, Pixel.transparent(), "", False, radius)
+
+    @staticmethod
+    def gaussian_blur(sigma: float, radius: int) -> PipelineNode:
+
+        require_finite_float(sigma, "sigma")
+        if sigma <= 0.0 or sigma > 64.0:
+            raise InvalidImageError("PipelineNode.gaussian_blur sigma must be in (0.0, 64.0]")
+        eff_rad: int = radius
+        if eff_rad == 0:
+            eff_rad = int(nox.mathx.ceil(3.0 * sigma))
+            if eff_rad < 1:
+                eff_rad = 1
+            if eff_rad > 32:
+                eff_rad = 32
+        if eff_rad < 1 or eff_rad > 32:
+            raise DimensionError("PipelineNode.gaussian_blur radius must be in [1, 32]")
+        return PipelineNode(PipelineNodeKind.FILTER, eff_rad, 0, 0, 0, sigma, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.GAUSSIAN_BLUR, Pixel.transparent(), "", False, eff_rad)
+
+    @staticmethod
+    def sharpen(strength: float) -> PipelineNode:
+
+        require_finite_float(strength, "strength")
+        if strength < 0.0:
+            raise InvalidImageError("PipelineNode.sharpen strength must be non-negative")
+        return PipelineNode(PipelineNodeKind.FILTER, 0, 0, 0, 0, strength, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.SHARPEN, Pixel.transparent(), "", False, 1)
+
+    @staticmethod
+    def sobel() -> PipelineNode:
+
+        return PipelineNode(PipelineNodeKind.FILTER, 0, 0, 0, 0, 0.0, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.SOBEL, Pixel.transparent(), "", False, 1)
+
+    @staticmethod
+    def median(radius: int) -> PipelineNode:
+
+        if radius < 1 or radius > 5:
+            raise DimensionError("PipelineNode.median radius must be in [1, 5]")
+        return PipelineNode(PipelineNodeKind.FILTER, radius, 0, 0, 0, 0.0, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.MEDIAN, Pixel.transparent(), "", False, radius)
+
+    @staticmethod
+    def draw_rect_fill(x: int, y: int, w: int, h: int, fill: Pixel) -> PipelineNode:
+
+        if w <= 0 or h <= 0:
+            raise DimensionError("PipelineNode.draw_rect_fill w and h must be positive")
+        return PipelineNode(PipelineNodeKind.DRAW, x, y, w, h, 0.0, 0.0, ColorSpace.SRGB, ResampleFilter.NEAREST, PipelineFilterOp.NONE, fill, "", True, 0)

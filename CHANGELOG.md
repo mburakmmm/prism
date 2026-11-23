@@ -2,6 +2,14 @@
 
 All notable changes to Prism are documented in this file. Prism follows Semantic Versioning (`0.x` experimental phase gates leading to `1.0.0`).
 
+## [0.9.0] — 2026-11-23 (Phase F10 Pipeline DAG, Algebraic Planner & Halo-Aware Tile Engine)
+
+### Added
+
+- `pipeline/nodes.nox`, `pipeline/graph.nox`, `pipeline/planner.nox`: Strongly typed immutable `PipelineNode` (`DECODE`, `CONVERT_COLOR`, `ORIENT`, `CROP`, `PAD`, `FLIP`, `ROTATE90`, `RESIZE`, `FILTER`, `COMPOSITE`, `DRAW`, `ENCODE`), immutable `PipelineGraph`, and semantics-preserving `optimize_pipeline` (`Crop+Crop` fusion, `FlipH`/`FlipV` cancellation, `Rotate90` fusion/cancellation, `Invert+Invert` cancellation, `ConvertColor` deduplication, explicit `requires_materialization`).
+- `pipeline/tiles.nox`, `pipeline/cache.nox`, `pipeline/executor.nox`: Disjoint `TileRect` partitioner (`DEFAULT_TILE_SIZE = 256`, `compute_tile_grid`), halo-aware `execute_tiled_node` producing bit-exact equivalence across tile boundaries (`box_blur`, `gaussian_blur`, `sharpen`, `sobel`, `median`, point filters), deterministic CRC32-keyed LRU-bounded `PlanCache` (`max_bytes`), and `execute_graph_eager` / `execute_plan` / `execute_pipeline` / `execute_pipeline_cached`.
+- `examples/pipeline_demo.nox` & `tests/unit/pipeline_test.nox`: Algebraic planner tests, halo/seam golden equivalence tests, 1,000 pseudo-random valid pipeline eager-vs-lazy equivalence tests, and `PlanCache` LRU eviction tests verified on LLVM, QBE, and `--profile freestanding`.
+
 ## [0.8.5] — 2026-11-23 (Phase F9 Animation Model, Timeline Compositor & Pure-NOX GIF Engine)
 
 ### Added

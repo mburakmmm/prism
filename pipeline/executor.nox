@@ -1,0 +1,50 @@
+from core.image import Image
+from pipeline.cache import PlanCache
+from pipeline.graph import PipelineGraph
+from pipeline.nodes import PipelineNode
+from pipeline.planner import ExecutionPlan, optimize_pipeline
+from pipeline.tiles import apply_pipeline_node, execute_tiled_node
+
+__all__: list[str] = ["execute_node_eager", "execute_graph_eager", "execute_plan", "execute_pipeline", "execute_pipeline_cached"]
+
+def execute_node_eager(img: Image, node: PipelineNode) -> Image:
+    """Execute a single PipelineNode eagerly without tiling."""
+    return apply_pipeline_node(img, node)
+
+def execute_graph_eager(img: Image, graph: PipelineGraph) -> Image:
+    """Reference eager sequential execution of all nodes in `graph` without planning or tiling."""
+    cur: Image = img.clone()
+    i: int = 0
+    while i < len(graph.nodes):
+        cur = apply_pipeline_node(cur, graph.nodes[i])
+        i = i + 1
+    return cur
+
+def execute_plan(img: Image, plan: ExecutionPlan, tile_size: int) -> Image:
+    """Execute an optimized ExecutionPlan, using halo-aware tiling for tileable nodes above `tile_size`."""
+    cur: Image = img.clone()
+    i: int = 0
+    while i < len(plan.optimized_nodes):
+        node: PipelineNode = plan.optimized_nodes[i]
+        if tile_size > 0 and node.is_tileable() and (cur.width() > tile_size or cur.height() > tile_size):
+            cur = execute_tiled_node(cur, node, tile_size)
+        else:
+            cur = apply_pipeline_node(cur, node)
+        i = i + 1
+    return cur
+
+def execute_pipeline(img: Image, graph: PipelineGraph, tile_size: int) -> Image:
+    """Optimize `graph` into an ExecutionPlan and execute it with halo-aware tiling."""
+    plan: ExecutionPlan = optimize_pipeline(graph)
+    return execute_plan(img, plan, tile_size)
+
+def execute_pipeline_cached(img: Image, graph: PipelineGraph, tile_size: int, cache: PlanCache, version: str) -> Image:
+    """Optimize `graph`, look up deterministic PlanCache entry, or compute and store the result."""
+    plan: ExecutionPlan = optimize_pipeline(graph)
+    key: str = PlanCache.make_cache_key(img, plan.fingerprint, version)
+    if cache.has(key):
+        return cache.get_copy(key)
+    cache.misses = cache.misses + 1
+    out_img: Image = execute_plan(img, plan, tile_size)
+    cache.put(key, out_img)
+    return out_img

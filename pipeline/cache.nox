@@ -1,0 +1,142 @@
+from codecs.deflate import crc32_bytes
+from core.errors import DimensionError, PipelineError
+from core.image import Image
+
+__all__: list[str] = ["CacheEntry", "PlanCache"]
+
+class CacheEntry:
+    """Cached immutable Image entry tracked inside a bounded LRU PlanCache."""
+
+    key: str
+    img: Image
+    byte_size: int
+    last_used: int
+
+    def __init__(self, key: str, img: Image, byte_size: int, last_used: int) -> None:
+        self.key = key
+        self.img = img
+        self.byte_size = byte_size
+        self.last_used = last_used
+
+class PlanCache:
+    """Memory-bounded deterministic LRU cache keyed by input fingerprint, plan fingerprint, and version."""
+
+    max_bytes: int
+    current_bytes: int
+    clock: int
+    hits: int
+    misses: int
+    evictions: int
+    entries: list[CacheEntry]
+
+    def __init__(self, max_bytes: int) -> None:
+        if max_bytes < 0:
+            raise DimensionError("PlanCache max_bytes must be non-negative")
+        self.max_bytes = max_bytes
+        self.current_bytes = 0
+        self.clock = 0
+        self.hits = 0
+        self.misses = 0
+        self.evictions = 0
+        self.entries = []
+
+    @staticmethod
+    def create(max_bytes: int) -> PlanCache:
+
+        return PlanCache(max_bytes)
+
+    @staticmethod
+    def make_cache_key(img: Image, plan_fingerprint: str, version: str) -> str:
+
+        crc: int = crc32_bytes(img.raw_bytes())
+        return version + "|" + str(img.width()) + "x" + str(img.height()) + "|" + img.pixel_format().name() + "|" + img.color_space.name() + "|" + str(crc) + "|" + plan_fingerprint
+
+    def entry_count(self) -> int:
+
+        return len(self.entries)
+
+    def used_bytes(self) -> int:
+
+        return self.current_bytes
+
+    def clear(self) -> None:
+
+        self.entries = []
+        self.current_bytes = 0
+
+    def _find_index(self, key: str) -> int:
+
+        i: int = 0
+        while i < len(self.entries):
+            if self.entries[i].key == key:
+                return i
+            i = i + 1
+        return -1
+
+    def has(self, key: str) -> bool:
+
+        return self._find_index(key) >= 0
+
+    def get_copy(self, key: str) -> Image:
+
+        idx: int = self._find_index(key)
+        if idx < 0:
+            self.misses = self.misses + 1
+            raise PipelineError("cache key not found: " + key)
+        self.clock = self.clock + 1
+        self.hits = self.hits + 1
+        ent: CacheEntry = self.entries[idx]
+        ent.last_used = self.clock
+        return ent.img.clone()
+
+    def _evict_lru_one(self) -> bool:
+
+        if len(self.entries) == 0:
+            return False
+        best_idx: int = 0
+        best_tick: int = self.entries[0].last_used
+        i: int = 1
+        while i < len(self.entries):
+            if self.entries[i].last_used < best_tick:
+                best_tick = self.entries[i].last_used
+                best_idx = i
+            i = i + 1
+        victim: CacheEntry = self.entries[best_idx]
+        self.current_bytes = self.current_bytes - victim.byte_size
+        self.evictions = self.evictions + 1
+        next_entries: list[CacheEntry] = []
+        j: int = 0
+        while j < len(self.entries):
+            if j != best_idx:
+                next_entries.append(self.entries[j])
+            j = j + 1
+        self.entries = next_entries
+        return True
+
+    def put(self, key: str, img: Image) -> bool:
+
+        img_bytes: int = img.width() * img.height() * img.bytes_per_pixel()
+        if img_bytes > self.max_bytes:
+            return False
+
+        # Replace existing key if already present
+        existing: int = self._find_index(key)
+        if existing >= 0:
+            old: CacheEntry = self.entries[existing]
+            self.current_bytes = self.current_bytes - old.byte_size
+            next_entries: list[CacheEntry] = []
+            j: int = 0
+            while j < len(self.entries):
+                if j != existing:
+                    next_entries.append(self.entries[j])
+                j = j + 1
+            self.entries = next_entries
+
+        while self.current_bytes + img_bytes > self.max_bytes:
+            if not self._evict_lru_one():
+                return False
+
+        self.clock = self.clock + 1
+        self.entries.append(CacheEntry(key, img.clone(), img_bytes, self.clock))
+        self.current_bytes = self.current_bytes + img_bytes
+        return True

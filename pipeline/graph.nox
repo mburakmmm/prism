@@ -1,0 +1,136 @@
+from core.pixel import ColorSpace, Pixel
+from filters.enhance import GrayscaleMode
+from pipeline.nodes import PipelineNode
+from transforms.resample import ResampleFilter
+
+__all__: list[str] = ["PipelineGraph"]
+
+class PipelineGraph:
+    """Immutable ordered operation graph (DAG chain) for deferred and tiled image processing."""
+
+    nodes: list[PipelineNode]
+
+    def __init__(self, nodes: list[PipelineNode]) -> None:
+        copied: list[PipelineNode] = []
+        i: int = 0
+        while i < len(nodes):
+            copied.append(nodes[i])
+            i = i + 1
+        self.nodes = copied
+
+    @staticmethod
+    def empty() -> PipelineGraph:
+
+        return PipelineGraph([])
+
+    def length(self) -> int:
+
+        return len(self.nodes)
+
+    def append(self, node: PipelineNode) -> PipelineGraph:
+
+        next_nodes: list[PipelineNode] = []
+        i: int = 0
+        while i < len(self.nodes):
+            next_nodes.append(self.nodes[i])
+            i = i + 1
+        next_nodes.append(node)
+        return PipelineGraph(next_nodes)
+
+    def crop(self, x: int, y: int, w: int, h: int) -> PipelineGraph:
+
+        return self.append(PipelineNode.crop(x, y, w, h))
+
+    def pad(self, left: int, top: int, right: int, bottom: int, fill: Pixel) -> PipelineGraph:
+
+        return self.append(PipelineNode.pad(left, top, right, bottom, fill))
+
+    def flip_horizontal(self) -> PipelineGraph:
+
+        return self.append(PipelineNode.flip_h())
+
+    def flip_vertical(self) -> PipelineGraph:
+
+        return self.append(PipelineNode.flip_v())
+
+    def rotate90(self, turns: int) -> PipelineGraph:
+
+        return self.append(PipelineNode.rotate90(turns))
+
+    def resize(self, w: int, h: int, flt: ResampleFilter) -> PipelineGraph:
+
+        return self.append(PipelineNode.resize(w, h, flt))
+
+    def convert_color(self, target: ColorSpace) -> PipelineGraph:
+
+        return self.append(PipelineNode.convert_color(target))
+
+    def invert(self) -> PipelineGraph:
+
+        return self.append(PipelineNode.invert())
+
+    def grayscale(self, mode: GrayscaleMode) -> PipelineGraph:
+
+        return self.append(PipelineNode.grayscale(mode))
+
+    def brightness(self, delta: int) -> PipelineGraph:
+
+        return self.append(PipelineNode.brightness(delta))
+
+    def contrast(self, factor: float) -> PipelineGraph:
+
+        return self.append(PipelineNode.contrast(factor))
+
+    def box_blur(self, radius: int) -> PipelineGraph:
+
+        return self.append(PipelineNode.box_blur(radius))
+
+    def gaussian_blur(self, sigma: float, radius: int) -> PipelineGraph:
+
+        return self.append(PipelineNode.gaussian_blur(sigma, radius))
+
+    def sharpen(self, strength: float) -> PipelineGraph:
+
+        return self.append(PipelineNode.sharpen(strength))
+
+    def sobel(self) -> PipelineGraph:
+
+        return self.append(PipelineNode.sobel())
+
+    def median(self, radius: int) -> PipelineGraph:
+
+        return self.append(PipelineNode.median(radius))
+
+    def fill_rect(self, x: int, y: int, w: int, h: int, fill: Pixel) -> PipelineGraph:
+
+        return self.append(PipelineNode.draw_rect_fill(x, y, w, h, fill))
+
+    def requires_materialization(self) -> bool:
+
+        i: int = 0
+        while i < len(self.nodes):
+            if self.nodes[i].requires_materialization:
+                return True
+            i = i + 1
+        return False
+
+    def max_halo_radius(self) -> int:
+
+        best: int = 0
+        i: int = 0
+        while i < len(self.nodes):
+            if self.nodes[i].halo_radius > best:
+                best = self.nodes[i].halo_radius
+            i = i + 1
+        return best
+
+    def fingerprint(self) -> str:
+
+        acc: str = "G["
+        i: int = 0
+        while i < len(self.nodes):
+            if i > 0:
+                acc = acc + ";"
+            acc = acc + self.nodes[i].fingerprint()
+            i = i + 1
+        return acc + "]"

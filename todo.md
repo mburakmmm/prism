@@ -55,8 +55,8 @@ Bu dosya, `AGENTS.md` içindeki bağlayıcı mühendislik sözleşmesini, güven
 | **v0.7.0** | **F7** | Drawing, Text, Masks & Compositing (Porter-Duff, Blend Modes, Shapes, Antialiased Rasterizer, Iterative Flood Fill, Embedded Bitmap Font) | Programatik Üretim | **TAMAMLANDI** |
 | **v0.8.0** | **F8** | Native Codec Adapters (İzole C ABI Sınırı, Opt-in JPEG & WebP Decode/Encode, `CodecUnavailableError` Fallback, Leak/CVE Harness) | Web / Backend Sürümü | **TAMAMLANDI** |
 | **v0.8.5** | **F9** | Animation & Advanced Formats (`Frame`/`Animation` Modeli, GIF LZW/Disposal/Transparency/Loop, APNG & Animated WebP Pilotu) | Profesyonel | **TAMAMLANDI** |
-| **v0.9.0** | **F10** | Pipeline DAG, Planner & Tile Engine (Immutable Operasyon Grafı, Güvenli Plan Optimizasyonu, Halo/Border Hesabı, Bounded Tile Executor, Cache) | Yüksek Performans | **SIRADAKİ FAZ** |
-| **v0.9.2** | **F11** | Streaming, Large Image & Batch Processing (`ImageReader`/`ImageWriter`, Disk Spill & Quota, Atomik Commit, `spawn` Paralel Tile/Batch) | Yüksek Performans | PLANLANDI |
+| **v0.9.0** | **F10** | Pipeline DAG, Planner & Tile Engine (Immutable Operasyon Grafı, Güvenli Plan Optimizasyonu, Halo/Border Hesabı, Bounded Tile Executor, Cache) | Yüksek Performans | **TAMAMLANDI** |
+| **v0.9.2** | **F11** | Streaming, Large Image & Batch Processing (`ImageReader`/`ImageWriter`, Disk Spill & Quota, Atomik Commit, `spawn` Paralel Tile/Batch) | Yüksek Performans | **SIRADAKİ FAZ** |
 | **v0.9.4** | **F12** | Advanced Color/Type & Pro Features (`GRAY16`/`RGB16`/`RGBA16`/`RGBAF32`, PNG 16-bit/Adam7, Quantization, Dithering, CLAHE, Canny, ICC Adapter) | Profesyonel | PLANLANDI |
 | **v0.9.6** | **F13** | Ecosystem Integrations & CLI (`prism` CLI, Nyx Upload/Thumbnail, Aether, Ember Batch, Aura Surface, Nova HTTP SSRF-Safe Adapter, Atlas/Pulse/Glyph) | Ekosistem & Web | PLANLANDI |
 | **v0.9.8** | **F14** | Portability (`wasm32-wasi`, `wasm32-freestanding`, `--profile freestanding` Saf Piksel Çekirdeği, Mobil Link/ABI Denetimi) | Taşınabilirlik | PLANLANDI |
@@ -441,22 +441,22 @@ Bağımlılık sırası: `v0.0.1 (F0) -> v0.1.0 (F1) -> v0.2.0 (F2) -> v0.3.0 (F
 **Hedef:** Lazy (tembel) operasyon grafı, renk/alpha sırasını bozmayan güvenli plan optimizasyonu ve halo-doğru tile tabanlı yürütme motoru.
 
 #### F10.1 — Immutable Pipeline DAG ve Planner (`pipeline/graph.nox`, `pipeline/nodes.nox`, `pipeline/planner.nox`)
-- [ ] Tipli `PipelineNode` türleri: `Decode`, `ConvertColor`, `Orient`, `Crop`, `Pad`, `Flip`, `Rotate90`, `Resize`, `Filter`, `Composite`, `Draw`, `Encode` (`eval` veya keyfi string çalıştırma kesinlikle yok).
-- [ ] Güvenli plan optimizasyonu:
-  - [ ] Ardışık `Crop` düğümlerinin tek `Crop` düğümüne birleştirilmesi.
-  - [ ] Ardışık `Flip` (`flip_h` + `flip_h` = identity) ve `Rotate90` (`90` + `90` = `180`) sadeleştirmesi.
-  - [ ] Ardışık aynı hedef `ConvertColor` düğümlerinin elenmesi (renk/alpha semantiğini değiştiren sıralama değişiklikleri yasak).
-  - [ ] Tam görüntü gerektiren işlemler için açık `requires_materialization` bayrağı.
+- [x] Tipli `PipelineNode` türleri: `DECODE`, `CONVERT_COLOR`, `ORIENT`, `CROP`, `PAD`, `FLIP`, `ROTATE90`, `RESIZE`, `FILTER`, `COMPOSITE`, `DRAW`, `ENCODE` (`eval` veya keyfi string çalıştırma kesinlikle yok).
+- [x] Güvenli plan optimizasyonu (`optimize_pipeline`):
+  - [x] Ardışık `Crop` düğümlerinin tek `Crop` düğümüne birleştirilmesi.
+  - [x] Ardışık `Flip` (`flip_h` + `flip_h` = identity) ve `Rotate90` (`90` + `90` = `180`) sadeleştirmesi.
+  - [x] Ardışık aynı hedef `ConvertColor` düğümlerinin elenmesi ve `Invert+Invert` iptali (renk/alpha semantiğini değiştiren sıralama değişiklikleri yasak).
+  - [x] Tam görüntü gerektiren işlemler için açık `requires_materialization` bayrağı.
 
 #### F10.2 — Tile Executor, Halo Hesabı ve Cache (`pipeline/tiles.nox`, `pipeline/cache.nox`, `pipeline/executor.nox`)
-- [ ] Yapılandırılabilir tile boyutu (varsayılan `256x256`), konvolüsyon/Gaussian blur için otomatik halo (kenar payı) genişletme ve kesme (tile birleşim yerlerinde çizgi/seam oluşmaması).
-- [ ] İçerik fingerprint + operatör zinciri + renk profili + sürüm tabanlı deterministik cache key ve bellek bütçeli (`max_bytes`, LRU/FIFO eviction) `PlanCache`.
+- [x] Yapılandırılabilir tile boyutu (varsayılan `DEFAULT_TILE_SIZE = 256`), konvolüsyon/Gaussian blur/Sobel/median için otomatik halo (kenar payı) genişletme ve kesme (`compute_tile_grid`, `execute_tiled_node` — tile birleşim yerlerinde sıfır seam/arteakt).
+- [x] İçerik CRC32 + boyut/format/renk uzayı + plan fingerprint + sürüm tabanlı deterministik cache key ve bellek bütçeli (`max_bytes`, LRU eviction) `PlanCache`.
 
 #### Faz F10 (`v0.9.0`) Çıkış Kapısı
-- [ ] Eager ve lazy/tiled yürütme aynı görüntüyü (float filtrelerde tanımlı tolerans içinde, tam sayı işlemlerde bit-exact) üretiyor.
-- [ ] Rastgele 1000 geçerli pipeline ifadesi karşılaştırma testini geçiyor.
-- [ ] Tile sınırlarında (seam/halo) sıfır artefakt golden testi geçiyor.
-- [ ] Cache boyut sınırı ve eviction politikası testli.
+- [x] Eager ve lazy/tiled yürütme aynı görüntüyü bit-exact (`pixel_equals == True`) üretiyor.
+- [x] Rastgele 1000 geçerli pipeline ifadesi karşılaştırma testini geçiyor (`tests/unit/pipeline_test.nox`).
+- [x] Tile sınırlarında (seam/halo) sıfır artefakt golden testi geçiyor.
+- [x] Cache boyut sınırı (`max_bytes`) ve LRU eviction politikası testli.
 
 ---
 
@@ -860,4 +860,38 @@ Bağımlılık sırası: `v0.0.1 (F0) -> v0.1.0 (F1) -> v0.2.0 (F2) -> v0.3.0 (F
   noxc run examples/animation_gif.nox
   noxc run --backend qbe examples/animation_gif.nox
   => animation-gif-ok 32 32 3 360
+  ```
+
+### `v0.9.0` (Faz F10 — Pipeline DAG, Algebraic Planner & Halo-Aware Tile Engine) — 2026-11-23
+
+- **Derleyici & Ortam:** `noxc 2.2.38` (`/Users/melihburakmemis/.nox-lang/bin/noxc`), macOS arm64 (Apple Silicon).
+- **Çalıştırılan Doğrulama Komutları ve Çıktıları:**
+  ```text
+  noxc check prism.nox
+  noxc check --strict-spawn-shared prism.nox
+  noxc check --profile freestanding pipeline/*.nox (6 modül)
+  => 0 type errors
+
+  noxc test
+  => gif_animation_test-ok
+  => native_adapters_test-ok
+  => png_test-ok
+  => portable_codecs_test-ok
+  => header_fuzz_test-ok: 10000 iterations, 10000 rejected cleanly
+  => resample_golden_test-ok: 120 golden cases passed
+  => color_metadata_test-ok
+  => core_pixel_test-ok: 2x2, color, ppm/pgm, 26 negative tests, 1000 random image properties passed
+  => draw_composite_test-ok
+  => facade_test-ok
+  => filters_test-ok
+  => geometry_test-ok
+  => pipeline_test-ok: 1000 random pipelines, seam/halo & LRU cache passed
+  => 13 passed, 0 failed (13 total)
+
+  noxc test --backend qbe
+  => 13 passed, 0 failed (13 total)
+
+  noxc run examples/pipeline_demo.nox
+  noxc run --backend qbe examples/pipeline_demo.nox
+  => pipeline-demo-ok 24 24 2 1
   ```

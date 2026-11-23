@@ -1,0 +1,187 @@
+from core.color import convert_color_space
+from core.errors import DimensionError, PipelineError
+from core.image import Image, MutableImage
+from core.pixel import ColorSpace, Pixel, PixelFormat
+from draw.canvas import Canvas
+from draw.shapes import fill_rect
+from filters.edges import sobel
+from filters.enhance import GrayscaleMode, brightness, contrast, grayscale, invert
+from filters.gaussian import box_blur, gaussian_blur
+from filters.median import median_filter
+from filters.sharpen import sharpen
+from pipeline.nodes import PipelineFilterOp, PipelineNode, PipelineNodeKind
+from transforms.border import BorderMode, pad_image
+from transforms.crop import crop_image
+from transforms.flip import flip_horizontal, flip_vertical
+from transforms.resize import resize_exact
+from transforms.rotate import apply_exif_orientation, rotate180, rotate270, rotate90
+
+DEFAULT_TILE_SIZE: int = 256
+
+class TileRect:
+    """Disjoint output tile coordinates paired with clamped input halo padding extents."""
+
+    x: int
+    y: int
+    w: int
+    h: int
+    halo_left: int
+    halo_top: int
+    halo_right: int
+    halo_bottom: int
+
+    def __init__(self, x: int, y: int, w: int, h: int, halo_left: int, halo_top: int, halo_right: int, halo_bottom: int) -> None:
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.halo_left = halo_left
+        self.halo_top = halo_top
+        self.halo_right = halo_right
+        self.halo_bottom = halo_bottom
+
+def compute_tile_grid(width: int, height: int, tile_size: int, halo: int) -> list[TileRect]:
+    """Partition `width x height` into disjoint tiles up to `tile_size x tile_size` with clamped `halo` aprons."""
+    if width <= 0 or height <= 0:
+        raise DimensionError("compute_tile_grid requires positive width and height")
+    if tile_size < 1:
+        raise DimensionError("compute_tile_grid tile_size must be >= 1")
+    if halo < 0:
+        raise DimensionError("compute_tile_grid halo must be non-negative")
+
+    tiles: list[TileRect] = []
+    ty: int = 0
+    while ty < height:
+        th: int = tile_size
+        if ty + th > height:
+            th = height - ty
+        h_top: int = halo
+        if h_top > ty:
+            h_top = ty
+        rem_y: int = height - (ty + th)
+        h_bot: int = halo
+        if h_bot > rem_y:
+            h_bot = rem_y
+
+        tx: int = 0
+        while tx < width:
+            tw: int = tile_size
+            if tx + tw > width:
+                tw = width - tx
+            h_left: int = halo
+            if h_left > tx:
+                h_left = tx
+            rem_x: int = width - (tx + tw)
+            h_right: int = halo
+            if h_right > rem_x:
+                h_right = rem_x
+
+            tiles.append(TileRect(tx, ty, tw, th, h_left, h_top, h_right, h_bot))
+            tx = tx + tile_size
+        ty = ty + tile_size
+
+    return tiles
+
+def apply_pipeline_node(img: Image, node: PipelineNode) -> Image:
+    """Execute a single PipelineNode eagerly on `img` and return a new immutable Image."""
+    match node.kind:
+        case PipelineNodeKind.CONVERT_COLOR:
+            return convert_color_space(img, node.color_target)
+        case PipelineNodeKind.ORIENT:
+            return apply_exif_orientation(img, node.i0)
+        case PipelineNodeKind.CROP:
+            return crop_image(img, node.i0, node.i1, node.i2, node.i3)
+        case PipelineNodeKind.PAD:
+            return pad_image(img, node.i0, node.i1, node.i2, node.i3, node.pixel_param)
+        case PipelineNodeKind.FLIP:
+            if node.i0 == 0:
+                return flip_horizontal(img)
+            return flip_vertical(img)
+        case PipelineNodeKind.ROTATE90:
+            turns: int = (node.i0 % 4 + 4) % 4
+            if turns == 1:
+                return rotate90(img)
+            if turns == 2:
+                return rotate180(img)
+            if turns == 3:
+                return rotate270(img)
+            return img.clone()
+        case PipelineNodeKind.RESIZE:
+            return resize_exact(img, node.i0, node.i1, node.resample_filter, True, False)
+        case PipelineNodeKind.FILTER:
+            match node.filter_op:
+                case PipelineFilterOp.INVERT:
+                    return invert(img)
+                case PipelineFilterOp.GRAYSCALE_SRGB:
+                    return grayscale(img, GrayscaleMode.SRGB_LUMA)
+                case PipelineFilterOp.GRAYSCALE_LINEAR:
+                    return grayscale(img, GrayscaleMode.LINEAR_LUMINANCE)
+                case PipelineFilterOp.BRIGHTNESS:
+                    return brightness(img, node.i0)
+                case PipelineFilterOp.CONTRAST:
+                    return contrast(img, node.f0)
+                case PipelineFilterOp.BOX_BLUR:
+                    return box_blur(img, node.i0, BorderMode.CLAMP)
+                case PipelineFilterOp.GAUSSIAN_BLUR:
+                    return gaussian_blur(img, node.f0, node.i0, BorderMode.CLAMP)
+                case PipelineFilterOp.SHARPEN:
+                    return sharpen(img, node.f0)
+                case PipelineFilterOp.SOBEL:
+                    return sobel(img)
+                case PipelineFilterOp.MEDIAN:
+                    return median_filter(img, node.i0)
+                case _:
+                    return img.clone()
+        case PipelineNodeKind.DRAW:
+            cv: Canvas = Canvas.from_image(img)
+            fill_rect(cv, node.i0, node.i1, node.i2, node.i3, node.pixel_param)
+            drawn: Image = cv.to_image()
+            drawn.color_space = img.color_space
+            drawn.metadata = img.metadata.clone()
+            return drawn
+        case _:
+            return img.clone()
+
+def _copy_tile_patch(dst_mut: MutableImage, src_tile: Image, src_x: int, src_y: int, dst_x: int, dst_y: int, w: int, h: int) -> None:
+    py: int = 0
+    while py < h:
+        px_x: int = 0
+        while px_x < w:
+            dst_mut.set_pixel(dst_x + px_x, dst_y + py, src_tile.get_pixel(src_x + px_x, src_y + py))
+            px_x = px_x + 1
+        py = py + 1
+
+def execute_tiled_node(img: Image, node: PipelineNode, tile_size: int) -> Image:
+    """Execute a tileable node tile-by-tile with automatic neighborhood halo expansion and trimming."""
+    if not node.is_tileable():
+        raise PipelineError("node kind " + node.kind.name() + " requires full-image materialization and cannot be tiled")
+    if tile_size < 1:
+        raise DimensionError("execute_tiled_node tile_size must be >= 1")
+
+    w: int = img.width()
+    h: int = img.height()
+    tiles: list[TileRect] = compute_tile_grid(w, h, tile_size, node.halo_radius)
+    if len(tiles) == 0:
+        return apply_pipeline_node(img, node)
+
+    # Execute first tile to discover output PixelFormat and ColorSpace cleanly
+    t0: TileRect = tiles[0]
+    src0: Image = crop_image(img, t0.x - t0.halo_left, t0.y - t0.halo_top, t0.w + t0.halo_left + t0.halo_right, t0.h + t0.halo_top + t0.halo_bottom)
+    dst0: Image = apply_pipeline_node(src0, node)
+
+    out_mut: MutableImage = MutableImage.create(w, h, dst0.pixel_format(), Pixel.transparent(), img.limits)
+    _copy_tile_patch(out_mut, dst0, t0.halo_left, t0.halo_top, t0.x, t0.y, t0.w, t0.h)
+
+    ti: int = 1
+    while ti < len(tiles):
+        t: TileRect = tiles[ti]
+        src_crop: Image = crop_image(img, t.x - t.halo_left, t.y - t.halo_top, t.w + t.halo_left + t.halo_right, t.h + t.halo_top + t.halo_bottom)
+        dst_tile: Image = apply_pipeline_node(src_crop, node)
+        _copy_tile_patch(out_mut, dst_tile, t.halo_left, t.halo_top, t.x, t.y, t.w, t.h)
+        ti = ti + 1
+
+    res: Image = out_mut.to_image()
+    res.color_space = dst0.color_space
+    res.alpha_mode = dst0.alpha_mode
+    res.metadata = img.metadata.clone()
+    return res

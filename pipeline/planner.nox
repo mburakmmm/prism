@@ -1,0 +1,116 @@
+from core.limits import checked_add
+from pipeline.graph import PipelineGraph
+from pipeline.nodes import PipelineFilterOp, PipelineNode, PipelineNodeKind
+
+__all__: list[str] = ["ExecutionPlan", "optimize_pipeline"]
+
+class ExecutionPlan:
+    """Validated, algebraically simplified execution plan derived from a PipelineGraph."""
+
+    original_count: int
+    optimized_nodes: list[PipelineNode]
+    optimizations_applied: int
+    requires_materialization: bool
+    fingerprint: str
+
+    def __init__(self, original_count: int, optimized_nodes: list[PipelineNode], optimizations_applied: int, requires_materialization: bool, fingerprint: str) -> None:
+        self.original_count = original_count
+        self.optimized_nodes = optimized_nodes
+        self.optimizations_applied = optimizations_applied
+        self.requires_materialization = requires_materialization
+        self.fingerprint = fingerprint
+
+def _compute_nodes_fingerprint(nodes: list[PipelineNode]) -> str:
+    acc: str = "P["
+    i: int = 0
+    while i < len(nodes):
+        if i > 0:
+            acc = acc + ";"
+        acc = acc + nodes[i].fingerprint()
+        i = i + 1
+    return acc + "]"
+
+def optimize_pipeline(graph: PipelineGraph) -> ExecutionPlan:
+    """Apply semantics-preserving algebraic optimizations without reordering across color/alpha/geometry boundaries."""
+    work: list[PipelineNode] = []
+    i: int = 0
+    while i < len(graph.nodes):
+        work.append(graph.nodes[i])
+        i = i + 1
+
+    orig_count: int = len(work)
+    opt_count: int = 0
+    changed: bool = True
+
+    while changed:
+        changed = False
+        next_pass: list[PipelineNode] = []
+        idx: int = 0
+        n: int = len(work)
+        while idx < n:
+            cur: PipelineNode = work[idx]
+            # Drop no-op rotate90(0)
+            if cur.kind == PipelineNodeKind.ROTATE90 and cur.i0 % 4 == 0:
+                opt_count = opt_count + 1
+                changed = True
+                idx = idx + 1
+                continue
+
+            if idx + 1 < n:
+                nxt: PipelineNode = work[idx + 1]
+                # 1. Fuse consecutive CROP nodes when second crop stays within first crop's sub-rectangle
+                if cur.kind == PipelineNodeKind.CROP and nxt.kind == PipelineNodeKind.CROP:
+                    if nxt.i0 >= 0 and nxt.i1 >= 0 and checked_add(nxt.i0, nxt.i2) <= cur.i2 and checked_add(nxt.i1, nxt.i3) <= cur.i3:
+                        fused_crop: PipelineNode = PipelineNode.crop(checked_add(cur.i0, nxt.i0), checked_add(cur.i1, nxt.i1), nxt.i2, nxt.i3)
+                        next_pass.append(fused_crop)
+                        opt_count = opt_count + 1
+                        changed = True
+                        idx = idx + 2
+                        continue
+
+                # 2. Cancel consecutive identical FLIP (H+H or V+V)
+                if cur.kind == PipelineNodeKind.FLIP and nxt.kind == PipelineNodeKind.FLIP and cur.i0 == nxt.i0:
+                    opt_count = opt_count + 1
+                    changed = True
+                    idx = idx + 2
+                    continue
+
+                # 3. Fuse/cancel consecutive ROTATE90 turns
+                if cur.kind == PipelineNodeKind.ROTATE90 and nxt.kind == PipelineNodeKind.ROTATE90:
+                    sum_turns: int = (cur.i0 + nxt.i0) % 4
+                    if sum_turns != 0:
+                        next_pass.append(PipelineNode.rotate90(sum_turns))
+                    opt_count = opt_count + 1
+                    changed = True
+                    idx = idx + 2
+                    continue
+
+                # 4. Cancel consecutive INVERT
+                if cur.kind == PipelineNodeKind.FILTER and nxt.kind == PipelineNodeKind.FILTER and cur.filter_op == PipelineFilterOp.INVERT and nxt.filter_op == PipelineFilterOp.INVERT:
+                    opt_count = opt_count + 1
+                    changed = True
+                    idx = idx + 2
+                    continue
+
+                # 5. Deduplicate consecutive identical CONVERT_COLOR targets
+                if cur.kind == PipelineNodeKind.CONVERT_COLOR and nxt.kind == PipelineNodeKind.CONVERT_COLOR and cur.color_target == nxt.color_target:
+                    next_pass.append(cur)
+                    opt_count = opt_count + 1
+                    changed = True
+                    idx = idx + 2
+                    continue
+
+            next_pass.append(cur)
+            idx = idx + 1
+        work = next_pass
+
+    req_mat: bool = False
+    j: int = 0
+    while j < len(work):
+        if work[j].requires_materialization:
+            req_mat = True
+            break
+        j = j + 1
+
+    fp: str = _compute_nodes_fingerprint(work)
+    return ExecutionPlan(orig_count, work, opt_count, req_mat, fp)

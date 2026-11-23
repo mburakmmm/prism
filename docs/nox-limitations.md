@@ -28,6 +28,7 @@
 ## 4. Name Resolution & Cross-Module Signatures
 
 - **Module Name Shadowing (`NXL-003`):** Naming a local variable after any imported module alias (`pixel`, `image`, `limits`, `errors`, `color`, `metadata`, `options`, `storage`, `frame`, `ppm`, `pgm`, `bmp`, `png`, `gif`) causes variable/module resolution conflicts. Prism enforces short local variable names (`px`, `img`, `lim`, `err`, `clr`, `meta`, `opt`, `store`, `frm`).
+- **Fluent Method Chaining (`obj.m1().m2()`):** Calling a method directly on the return expression of another call (`PipelineGraph.empty().crop(...)` or `g.flip_horizontal().crop(...)`) can trigger a spurious type error (`call the static/class method '...' through the class name ...: the receiver expression has side effects and would not be evaluated`) when cross-module method/function resolution collides. Bind each intermediate return value to a local variable (`g = g.flip_horizontal()`, `g = g.crop(...)`) rather than chaining across multiple calls in one expression.
 - **Complex Class Nullable Fields & Optional Arguments (`NXL-001`, `NXL-005`):** Cross-module optional parameter dropping and complex nullable class fields (`int | None`) are fragile across module boundaries. Prism uses explicit factory constructors (`DecodeOptions.default()`, `ResizeOptions.fit_contain(...)`, `ResourceLimits.default()`) and explicit `has_*` boolean fields (`has_icc_profile`, `has_gps_data`).
 
 ## 5. Numeric, Arithmetic & Test Stdlib Gaps

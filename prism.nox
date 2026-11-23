@@ -41,6 +41,12 @@ from filters.gaussian import MAX_BLUR_RADIUS, box_blur, gaussian_blur, gaussian_
 from filters.median import MAX_MEDIAN_RADIUS, median_filter
 from filters.morphology import MAX_MORPH_RADIUS, dilate, erode, morphology_close, morphology_open
 from filters.sharpen import sharpen, unsharp_mask
+from pipeline.cache import CacheEntry, PlanCache
+from pipeline.executor import execute_graph_eager, execute_node_eager, execute_pipeline, execute_pipeline_cached, execute_plan
+from pipeline.graph import PipelineGraph
+from pipeline.nodes import PipelineFilterOp, PipelineNode, PipelineNodeKind
+from pipeline.planner import ExecutionPlan, optimize_pipeline
+from pipeline.tiles import DEFAULT_TILE_SIZE, TileRect, compute_tile_grid, execute_tiled_node
 from transforms.affine import AffineMatrix2D, affine_transform
 from transforms.border import BorderMode, pad_image, pad_with_mode, sample_with_border
 from transforms.crop import CropBoundsPolicy, crop_image, crop_with_policy
@@ -49,7 +55,7 @@ from transforms.resample import ResampleFilter, bicubic_weight, is_finite_float,
 from transforms.resize import ResizeFit, ResizeOptions, resize_exact, resize_image, resize_with_options, thumbnail
 from transforms.rotate import apply_exif_orientation, normalize_orientation, rotate90, rotate180, rotate270, rotate_arbitrary
 
-PRISM_VERSION: str = "0.8.5"
+PRISM_VERSION: str = "0.9.0"
 
 def prism_version() -> str:
     """Return the active Prism semantic version string."""

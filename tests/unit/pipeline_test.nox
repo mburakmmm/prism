@@ -1,0 +1,180 @@
+import nox.test
+from prism import ColorSpace, ExecutionPlan, GrayscaleMode, Image, MutableImage, PipelineError, PipelineGraph, PipelineNode, PipelineNodeKind, Pixel, PixelFormat, PlanCache, ResampleFilter, ResourceLimits, TileRect, compute_tile_grid, execute_graph_eager, execute_pipeline, execute_pipeline_cached, execute_tiled_node, optimize_pipeline
+
+def _make_textured_image(w: int, h: int) -> Image:
+    lim: ResourceLimits = ResourceLimits.default()
+    mut_img: MutableImage = MutableImage.create(w, h, PixelFormat.RGBA8, Pixel.transparent(), lim)
+    y: int = 0
+    while y < h:
+        x: int = 0
+        while x < w:
+            a_val: int = 255
+            if x < 2 and y < 2:
+                a_val = 0
+            elif (x + y) % 5 == 0:
+                a_val = 160
+            mut_img.set_pixel(x, y, Pixel.rgba(x * 19 + y * 7 & 255, y * 23 + x * 11 & 255, (x ^ y) * 31 & 255, a_val))
+            x = x + 1
+        y = y + 1
+    return mut_img.to_image()
+
+def test_planner_algebraic_optimizations() -> None:
+    # Consecutive crops, flip cancellations, rotate90 fusion/cancel, invert cancellation, convert_color dedup
+    g: PipelineGraph = PipelineGraph([])
+    g = g.crop(2, 3, 20, 20)
+    g = g.crop(4, 5, 10, 12)
+    g = g.flip_horizontal()
+    g = g.flip_horizontal()
+    g = g.flip_vertical()
+    g = g.flip_vertical()
+    g = g.rotate90(1)
+    g = g.rotate90(1)
+    g = g.invert()
+    g = g.invert()
+    g = g.convert_color(ColorSpace.LINEAR_SRGB)
+    g = g.convert_color(ColorSpace.LINEAR_SRGB)
+
+    plan: ExecutionPlan = optimize_pipeline(g)
+    nox.test.assert_eq_int(plan.original_count, 12, "original node count == 12")
+    # Remaining: fused Crop(6, 8, 10, 12), Rotate90(2), ConvertColor(LINEAR_SRGB) => 3 nodes
+    nox.test.assert_eq_int(len(plan.optimized_nodes), 3, "optimized node count == 3")
+    nox.test.assert_true(plan.optimizations_applied >= 5, "multiple optimizations applied")
+
+    n0: PipelineNode = plan.optimized_nodes[0]
+    nox.test.assert_true(n0.kind == PipelineNodeKind.CROP, "first node is fused CROP")
+    nox.test.assert_eq_int(n0.i0, 6, "fused crop x == 2 + 4")
+    nox.test.assert_eq_int(n0.i1, 8, "fused crop y == 3 + 5")
+    nox.test.assert_eq_int(n0.i2, 10, "fused crop w == 10")
+    nox.test.assert_eq_int(n0.i3, 12, "fused crop h == 12")
+
+    n1: PipelineNode = plan.optimized_nodes[1]
+    nox.test.assert_true(n1.kind == PipelineNodeKind.ROTATE90 and n1.i0 == 2, "fused rotate90(1)+rotate90(1) == rotate90(2)")
+
+    n2: PipelineNode = plan.optimized_nodes[2]
+    nox.test.assert_true(n2.kind == PipelineNodeKind.CONVERT_COLOR and n2.color_target == ColorSpace.LINEAR_SRGB, "deduped convert_color")
+
+    # Eager vs optimized execution bit-exact match
+    src: Image = _make_textured_image(30, 30)
+    eager_img: Image = execute_graph_eager(src, g)
+    opt_img: Image = execute_pipeline(src, g, 7)
+    nox.test.assert_true(opt_img.pixel_equals(eager_img), "optimized pipeline matches eager bit-exact")
+
+def test_tile_halo_zero_seam_artifacts() -> None:
+    src: Image = _make_textured_image(24, 24)
+    grid: list[TileRect] = compute_tile_grid(24, 24, 7, 2)
+    nox.test.assert_eq_int(len(grid), 16, "24x24 with tile_size=7 produces 4x4=16 tiles")
+    nox.test.assert_eq_int(grid[0].halo_left, 0, "top-left tile has halo_left=0")
+    nox.test.assert_eq_int(grid[0].halo_right, 2, "top-left tile has halo_right=2")
+    nox.test.assert_eq_int(grid[5].halo_left, 2, "interior tile has halo_left=2")
+
+    # Test neighborhood filter nodes tiled across 7x7 tiles vs full eager execution
+    nodes: list[PipelineNode] = [PipelineNode.gaussian_blur(1.2, 2), PipelineNode.box_blur(2), PipelineNode.sharpen(1.5), PipelineNode.sobel(), PipelineNode.median(1), PipelineNode.convert_color(ColorSpace.LINEAR_SRGB)]
+    ni: int = 0
+    while ni < len(nodes):
+        nd: PipelineNode = nodes[ni]
+        g_single: PipelineGraph = PipelineGraph([nd])
+        eager_out: Image = execute_graph_eager(src, g_single)
+        tiled_out: Image = execute_tiled_node(src, nd, 7)
+        nox.test.assert_true(tiled_out.pixel_equals(eager_out), "zero-seam tiled equivalence for " + nd.filter_op.name() + " / " + nd.kind.name())
+        ni = ni + 1
+
+def test_1000_random_pipelines_eager_vs_tiled() -> None:
+    src: Image = _make_textured_image(14, 14)
+    seed: int = 135792468
+    i: int = 0
+    while i < 1000:
+        g: PipelineGraph = PipelineGraph.empty()
+        cur_w: int = 14
+        cur_h: int = 14
+        steps: int = 2 + i % 4
+        s: int = 0
+        while s < steps:
+            seed = seed * 1664525 + 1013904223 & 2147483647
+            op_pick: int = (seed >> 16) % 13
+            if op_pick == 0:
+                g = g.flip_horizontal()
+            elif op_pick == 1:
+                g = g.flip_vertical()
+            elif op_pick == 2:
+                turns: int = 1 + (seed >> 8) % 3
+                g = g.rotate90(turns)
+                if turns % 2 == 1:
+                    tmp_w: int = cur_w
+                    cur_w = cur_h
+                    cur_h = tmp_w
+            elif op_pick == 3 and cur_w >= 8 and cur_h >= 8:
+                g = g.crop(1, 1, cur_w - 2, cur_h - 2)
+                cur_w = cur_w - 2
+                cur_h = cur_h - 2
+            elif op_pick == 4 and cur_w <= 16 and cur_h <= 16:
+                g = g.pad(1, 1, 1, 1, Pixel.black())
+                cur_w = cur_w + 2
+                cur_h = cur_h + 2
+            elif op_pick == 5:
+                g = g.invert()
+            elif op_pick == 6:
+                g = g.brightness(12)
+            elif op_pick == 7:
+                g = g.contrast(1.15)
+            elif op_pick == 8:
+                g = g.box_blur(1)
+            elif op_pick == 9:
+                g = g.gaussian_blur(0.9, 1)
+            elif op_pick == 10:
+                g = g.sharpen(0.75)
+            elif op_pick == 11:
+                g = g.median(1)
+            else:
+                g = g.grayscale(GrayscaleMode.SRGB_LUMA)
+            s = s + 1
+
+        eager_res: Image = execute_graph_eager(src, g)
+        lazy_res: Image = execute_pipeline(src, g, 5)
+        nox.test.assert_true(lazy_res.pixel_equals(eager_res), "random pipeline #" + str(i) + " eager vs optimized+tiled equivalence")
+        i = i + 1
+
+def test_plan_cache_lru_and_budget() -> None:
+    src1: Image = _make_textured_image(8, 8)
+    src2: Image = _make_textured_image(10, 10)
+    src3: Image = _make_textured_image(12, 12)
+
+    # Budget: 8*8*4 = 256 bytes, 10*10*4 = 400 bytes, 12*12*4 = 576 bytes; max_bytes = 700 holds at most 1+2 (656B)
+    cache: PlanCache = PlanCache.create(700)
+    g: PipelineGraph = PipelineGraph([])
+    g = g.invert()
+
+    out1: Image = execute_pipeline_cached(src1, g, 4, cache, "0.9.0")
+    nox.test.assert_eq_int(cache.misses, 1, "first lookup is miss")
+    nox.test.assert_eq_int(cache.entry_count(), 1, "cache has 1 entry")
+    nox.test.assert_eq_int(cache.used_bytes(), 256, "used_bytes == 256")
+
+    out1_hit: Image = execute_pipeline_cached(src1, g, 4, cache, "0.9.0")
+    nox.test.assert_eq_int(cache.hits, 1, "second lookup is hit")
+    nox.test.assert_true(out1_hit.pixel_equals(out1), "cached image matches")
+
+    execute_pipeline_cached(src2, g, 4, cache, "0.9.0")
+    nox.test.assert_eq_int(cache.used_bytes(), 656, "256 + 400 == 656 <= 700")
+
+    # Touch src1 so src2 becomes LRU before inserting src3 (576 bytes -> evicts BOTH or LRU until <= 700)
+    execute_pipeline_cached(src1, g, 4, cache, "0.9.0")
+    execute_pipeline_cached(src3, g, 4, cache, "0.9.0")
+    nox.test.assert_true(cache.used_bytes() <= 700, "cache enforces max_bytes <= 700 after eviction")
+    nox.test.assert_true(cache.evictions >= 1, "LRU eviction occurred")
+
+    # Oversized entry (> max_bytes) is safely skipped without crashing
+    big_img: Image = _make_textured_image(20, 20)
+    nox.test.assert_true(not cache.put("too_big", big_img), "oversized cache entry rejected cleanly")
+
+    # Non-tileable node passed directly to execute_tiled_node raises PipelineError
+    bad_tile: bool = False
+    try:
+        execute_tiled_node(src1, PipelineNode.crop(0, 0, 4, 4), 4)
+    except PipelineError:
+        bad_tile = True
+    nox.test.assert_true(bad_tile, "materializing node rejected by execute_tiled_node")
+
+test_planner_algebraic_optimizations()
+test_tile_halo_zero_seam_artifacts()
+test_1000_random_pipelines_eager_vs_tiled()
+test_plan_cache_lru_and_budget()
+print("pipeline_test-ok: 1000 random pipelines, seam/halo & LRU cache passed")
